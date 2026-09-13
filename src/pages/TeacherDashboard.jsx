@@ -15,6 +15,8 @@ import {
   deleteLesson,
 } from '../lib/api'
 import { useAuth } from '../context/AuthContext'
+import { listTeacherCalendarAssignments } from '../lib/calendarApi'
+import DueSoonStrip from '../components/DueSoonStrip'
 
 export default function TeacherDashboard() {
   const { user, logout } = useAuth()
@@ -28,6 +30,7 @@ export default function TeacherDashboard() {
   const [viewMode, setViewMode] = useState('folders')
   const [newFolderName, setNewFolderName] = useState('')
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
+  const [calendarAssignments, setCalendarAssignments] = useState([])
 
   useEffect(() => {
     loadData()
@@ -49,12 +52,14 @@ export default function TeacherDashboard() {
   async function loadData() {
     setLoading(true)
     try {
-      const [lessonsData, foldersData] = await Promise.all([
+      const [lessonsData, foldersData, calendarData] = await Promise.all([
         listLessonsWithStats(user.id),
-        listFolders(user.id)
+        listFolders(user.id),
+        listTeacherCalendarAssignments(),
       ])
       setLessons(lessonsData)
       setFolders(foldersData)
+      setCalendarAssignments(calendarData)
     } catch (err) {
       console.error('Failed to load dashboard:', err)
       toast.error('Could not load data. Please refresh.')
@@ -242,13 +247,25 @@ export default function TeacherDashboard() {
               >
                 Logout
               </button>
-              <Link 
-                to="/public-library" 
+              <Link
+                to="/public-library"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-sm text-warm-600 hover:text-warm-800"
               >
                 🌍 Shared Lessons
+              </Link>
+              <Link
+                to="/calendar"
+                className="text-sm text-warm-700 hover:text-warm-900 border border-warm-300 rounded-md px-3 py-1.5"
+              >
+                📅 Calendar
+              </Link>
+              <Link
+                to="/classes"
+                className="text-sm text-warm-700 hover:text-warm-900 border border-warm-300 rounded-md px-3 py-1.5"
+              >
+                🏫 My Classes
               </Link>
               <Link to="/builder" className="btn-primary">
                 + New Lesson
@@ -277,6 +294,14 @@ export default function TeacherDashboard() {
                 + Create Folder
               </button>
             </form>
+          </div>
+
+          <div className="mb-8">
+            <DueSoonStrip
+              assignments={calendarAssignments}
+              linkBuilder={(a) => `/classes/${a.class_id}/assignments/${a.id}`}
+              emptyText="No assignments due in the next 7 days."
+            />
           </div>
 
           {folders.length === 0 && uncategorisedCount === 0 ? (
@@ -371,7 +396,6 @@ export default function TeacherDashboard() {
     )
   }
 
-  // ---- LESSONS VIEW (professional card layout) ----
   return (
     <div className="min-h-screen bg-warm-50">
       <header className="bg-white/80 backdrop-blur-md border-b border-warm-200/60 sticky top-0 z-20">
@@ -402,13 +426,25 @@ export default function TeacherDashboard() {
             >
               Logout
             </button>
-            <Link 
-              to="/public-library" 
+            <Link
+              to="/public-library"
               target="_blank"
               rel="noopener noreferrer"
               className="text-sm text-warm-600 hover:text-warm-800"
             >
               🌍 Shared Lessons
+            </Link>
+            <Link
+              to="/calendar"
+              className="text-sm text-warm-700 hover:text-warm-900 border border-warm-300 rounded-md px-3 py-1.5"
+            >
+              📅 Calendar
+            </Link>
+            <Link
+              to="/classes"
+              className="text-sm text-warm-700 hover:text-warm-900 border border-warm-300 rounded-md px-3 py-1.5"
+            >
+              🏫 My Classes
             </Link>
             <Link to="/builder" className="btn-primary">
               + New Lesson
@@ -435,7 +471,6 @@ export default function TeacherDashboard() {
               return (
                 <div key={lesson.id} className="lesson-card">
                   <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
-                    {/* Left side: Title, description, metadata */}
                     <div className="flex-1 min-w-0">
                       <h3 className="text-lg font-semibold text-warm-900 truncate">
                         {lesson.title}
@@ -444,7 +479,6 @@ export default function TeacherDashboard() {
                         {description}
                       </p>
 
-                      {/* Metadata row */}
                       <div className="flex flex-wrap items-center gap-3 mt-3">
                         <span className={`level-badge level-badge-${level.toUpperCase()}`}>
                           {level}
@@ -469,9 +503,7 @@ export default function TeacherDashboard() {
                       </div>
                     </div>
 
-                    {/* Right side: Stats + Actions */}
                     <div className="flex items-center gap-2 flex-wrap flex-shrink-0 mt-2 md:mt-0">
-                      {/* Stats */}
                       <div className="flex items-center gap-3 mr-2 text-xs text-warm-500">
                         <span title="Completions">📝 {lesson.completedCount || 0}</span>
                         {lesson.avgPercent !== null && (
@@ -479,7 +511,6 @@ export default function TeacherDashboard() {
                         )}
                       </div>
 
-                      {/* Move dropdown */}
                       <select
                         value={lesson.folder_id || ''}
                         onChange={(e) => handleMoveLesson(lesson.id, e.target.value || null)}
@@ -492,7 +523,6 @@ export default function TeacherDashboard() {
                         ))}
                       </select>
 
-                      {/* Action buttons */}
                       <Link
                         to={`/lesson/${lesson.share_slug}`}
                         target="_blank"

@@ -1,0 +1,10 @@
+# Supabase project configuration
+# See https://supabase.com/docs/guides/functions/function-configuration
+
+project_id = "szhhvvupcpymtznlhkdn"
+
+[functions.admin-student-manager]
+verify_jwt = false
+
+[functions.generate-tts]
+verify_jwt = false

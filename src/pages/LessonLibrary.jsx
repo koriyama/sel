@@ -25,7 +25,9 @@ export default function LessonLibrary() {
         listLessonsWithStats(user.id),
         listFolders(user.id)
       ]);
-      setLessons(allLessons);
+      // Hide lessons that belong to a class. Those are managed inside
+      // the class view, not the personal library.
+      setLessons(allLessons.filter(l => !l.class_id));
       setFolders(userFolders);
     } catch (err) {
       toast.error('Failed to load lessons: ' + err.message);
@@ -120,18 +122,14 @@ export default function LessonLibrary() {
   return (
     <div className="min-h-screen bg-warm-50 py-8">
       <div className="container-wide">
-        {/* ---- Header with logo ---- */}
         <div className="flex flex-wrap justify-between items-center gap-4 mb-6">
           <div className="flex items-center gap-3">
             <img src="/sel.png" alt="SEL Logo" className="h-10 w-auto" />
             <h1 className="text-2xl font-display text-warm-900">My Lesson Library</h1>
           </div>
-          <Link to="/" className="btn-secondary">
-            ← Back to Dashboard
-          </Link>
+          <Link to="/" className="btn-secondary">← Back to Dashboard</Link>
         </div>
 
-        {/* Search and filter bar */}
         <div className="card p-4 mb-6 space-y-4">
           <div className="flex flex-wrap gap-4">
             <div className="flex-1 min-w-[200px]">
@@ -171,7 +169,6 @@ export default function LessonLibrary() {
             </div>
           </div>
 
-          {/* Bulk actions */}
           {filteredLessons.length > 0 && (
             <div className="flex flex-wrap items-center gap-4 border-t border-warm-100 pt-4">
               <div className="flex items-center gap-2">
@@ -198,19 +195,11 @@ export default function LessonLibrary() {
                 <option value="">📄 Uncategorised</option>
               </select>
 
-              <button
-                onClick={handleBulkMove}
-                disabled={selectedIds.size === 0 || !targetFolderId}
-                className="btn-secondary text-sm"
-              >
+              <button onClick={handleBulkMove} disabled={selectedIds.size === 0 || !targetFolderId} className="btn-secondary text-sm">
                 Move
               </button>
 
-              <button
-                onClick={handleBulkExport}
-                disabled={selectedIds.size === 0}
-                className="btn-secondary text-sm"
-              >
+              <button onClick={handleBulkExport} disabled={selectedIds.size === 0} className="btn-secondary text-sm">
                 📤 Export
               </button>
 
@@ -245,44 +234,30 @@ export default function LessonLibrary() {
         ) : (
           <div className="space-y-3">
             {filteredLessons.map((lesson) => (
-              <div
-                key={lesson.id}
-                className="card p-4 hover:shadow-hover transition-shadow flex flex-wrap items-center gap-4"
-              >
+              <div key={lesson.id} className="card p-4 hover:shadow-hover transition-shadow flex flex-wrap items-center gap-4">
                 <input
                   type="checkbox"
                   checked={selectedIds.has(lesson.id)}
                   onChange={() => toggleSelect(lesson.id)}
                   className="w-4 h-4 text-primary-600 rounded border-warm-300 focus:ring-primary-500 flex-shrink-0"
                 />
-
                 <div className="flex-1 min-w-0">
                   <div className="flex flex-wrap items-center gap-3">
-                    <h3 className="text-base font-medium text-warm-900 truncate">
-                      {lesson.title}
-                    </h3>
+                    <h3 className="text-base font-medium text-warm-900 truncate">{lesson.title}</h3>
                     <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                      lesson.status === 'published'
-                        ? 'bg-green-100 text-green-700'
-                        : 'bg-yellow-100 text-yellow-700'
+                      lesson.status === 'published' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
                     }`}>
                       {lesson.status}
                     </span>
                     <span className="text-xs text-warm-400 font-mono">{lesson.level}</span>
                     {lesson.is_public && (
-                      <span className="text-xs bg-accent-100 text-accent-700 px-2 py-0.5 rounded-full font-medium">
-                        🌍 Public
-                      </span>
+                      <span className="text-xs bg-accent-100 text-accent-700 px-2 py-0.5 rounded-full font-medium">🌍 Public</span>
                     )}
                   </div>
                   <div className="flex flex-wrap gap-4 mt-1 text-sm text-warm-500">
                     <span>📝 {lesson.completedCount || 0} completions</span>
-                    {lesson.avgPercent !== null && (
-                      <span>📊 Avg: {lesson.avgPercent}%</span>
-                    )}
-                    <span className="text-warm-400">
-                      {new Date(lesson.created_at).toLocaleDateString()}
-                    </span>
+                    {lesson.avgPercent !== null && <span>📊 Avg: {lesson.avgPercent}%</span>}
+                    <span className="text-warm-400">{new Date(lesson.created_at).toLocaleDateString()}</span>
                     <span className="text-warm-400 truncate">
                       {lesson.folder_id
                         ? `📁 ${folders.find(f => f.id === lesson.folder_id)?.name || 'Folder'}`
@@ -292,18 +267,8 @@ export default function LessonLibrary() {
                 </div>
 
                 <div className="flex items-center gap-2 flex-wrap flex-shrink-0">
-                  <Link
-                    to={`/builder/${lesson.id}`}
-                    className="btn-secondary text-sm px-3 py-1"
-                  >
-                    ✏️ Edit
-                  </Link>
-                  <Link
-                    to={`/results/${lesson.id}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-sm text-warm-500 hover:underline"
-                  >
+                  <Link to={`/builder/${lesson.id}`} className="btn-secondary text-sm px-3 py-1">✏️ Edit</Link>
+                  <Link to={`/results/${lesson.id}`} target="_blank" rel="noopener noreferrer" className="text-sm text-warm-500 hover:underline">
                     Results
                   </Link>
                   <button

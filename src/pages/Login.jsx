@@ -84,9 +84,12 @@ const Login = () => {
         </form>
 
         <div className="text-center text-sm border-t border-gray-200 pt-4">
-          <span className="text-gray-500">Are you a student? </span>
-          <Link to="/student-login" className="font-medium text-indigo-600 hover:text-indigo-500">
-            Student login
+          <span className="text-gray-400">Are you a student? </span>
+          <Link
+            to="/student-login"
+            className="font-bold text-indigo-700 underline hover:text-indigo-900"
+          >
+            Go to Student login
           </Link>
         </div>
 

@@ -3,6 +3,7 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import toast from 'react-hot-toast'
 import { useConfirm } from '../context/ConfirmContext'
+import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabaseClient';
 import { 
   getLessonBySlug, 
@@ -17,6 +18,11 @@ import {
   insertSubmissionViaRpc,
   getSubmissionByLessonStudent
 } from '../lib/api';
+import {
+  findMySubmission,
+  createMySubmission,
+  updateMySubmission,
+} from '../lib/studentSubmissionApi';
 import { 
   gradeGapFill, 
   gradeMultipleChoice, 
@@ -39,12 +45,10 @@ import DictationPlayer from '../components/activity-players/DictationPlayer';
 import ReferenceDrawer from '../components/ReferenceDrawer';
 import SaveExitButton from '../components/SaveExitButton';
 
-// Helper to strip punctuation for display
 function stripPunctuation(word) {
   return word.replace(/[.,!?;:"]$/, '');
 }
 
-// ---- Language translations ----
 const translations = {
   en: {
     enterNameTitle: (title) => `${title}`,
@@ -55,7 +59,6 @@ const translations = {
     namePlaceholder: 'Your full name',
     startButton: 'Start Lesson',
     previewBadge: '🔍 PREVIEW MODE',
-    // 
     instructionsTitle: (title, level, sections, activities) => `${title} · Level: ${level} · ${sections} sections · ${activities} activities`,
     aboutLesson: '📖 About this lesson',
     aboutLessonText: (sections) => `This lesson is divided into ${sections} sections. You'll complete activities in order, and your progress is saved automatically.`,
@@ -86,6 +89,7 @@ const translations = {
     statusPartial: '🟡 Partial',
     statusReview: '📝 Teacher review',
     statusNoGrade: '❓ No grade',
+    backToAssignment: '← Back to assignment',
   },
   ja: {
     enterNameTitle: (title) => `${title}`,
@@ -96,7 +100,6 @@ const translations = {
     namePlaceholder: 'フルネーム',
     startButton: 'レッスンを始める',
     previewBadge: '🔍 プレビューモード',
-    //
     instructionsTitle: (title, level, sections, activities) => `${title} · レベル: ${level} · ${sections} セクション · ${activities} アクティビティ`,
     aboutLesson: '📖 このレッスンについて',
     aboutLessonText: (sections) => `このレッスンは ${sections} つのセクションに分かれています。順番にアクティビティを進め、進捗は自動保存されます。`,
@@ -127,10 +130,10 @@ const translations = {
     statusPartial: '🟡 部分点',
     statusReview: '📝 教師確認',
     statusNoGrade: '❓ 未評価',
+    backToAssignment: '← 課題に戻る',
   }
 };
 
-// ---- Player Components ----
 function ListeningPlayer({ activity, value, onChange, disabled, language }) {
   const config = activity.config || {};
   const questions = config.questions || [];
@@ -205,15 +208,57 @@ function ListeningPlayer({ activity, value, onChange, disabled, language }) {
   );
 }
 
+// Small floating language toggle used on the pre-lesson screens.
+function FloatingLanguageToggle({ language, onChange }) {
+  return (
+    <div className="fixed top-4 right-4 z-50">
+      <div className="inline-flex rounded-full border border-warm-200 bg-white shadow-sm overflow-hidden">
+        <button
+          type="button"
+          onClick={() => onChange('en')}
+          className={`px-3 py-1 text-xs font-medium transition ${
+            language === 'en'
+              ? 'bg-primary-600 text-white'
+              : 'bg-transparent text-warm-600 hover:bg-warm-100'
+          }`}
+        >
+          English
+        </button>
+        <button
+          type="button"
+          onClick={() => onChange('ja')}
+          className={`px-3 py-1 text-xs font-medium transition ${
+            language === 'ja'
+              ? 'bg-primary-600 text-white'
+              : 'bg-transparent text-warm-600 hover:bg-warm-100'
+          }`}
+        >
+          日本語
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function StudentLesson() {
   const { slug } = useParams();
   const [searchParams] = useSearchParams();
   const isPreview = searchParams.get('draft') === 'true';
+  const assignmentId = searchParams.get('assignment') || null;
+  const assignmentItemId = searchParams.get('item') || null;
   const { confirm } = useConfirm();
+  const { user, role, displayName: authDisplayName, loading: authLoading } = useAuth();
+
+  const isAuthenticatedStudent = !!user && role === 'student';
 
   const [language, setLanguage] = useState(() => {
     return localStorage.getItem('preferred_language') || 'en';
   });
+
+  const setLanguagePersist = (lang) => {
+    setLanguage(lang);
+    localStorage.setItem('preferred_language', lang);
+  };
 
   const t = translations[language];
 
@@ -232,20 +277,18 @@ export default function StudentLesson() {
   const [isSubmitted, setIsSubmitted] = useState(false);
   const [score, setScore] = useState(null);
   const [showAnswers, setShowAnswers] = useState(false);
-
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const saveTimer = useRef(null);
   const isSaving = useRef(false);
-
   const activitiesContainerRef = useRef(null);
 
-  // Load lesson
   useEffect(() => {
+    if (authLoading) return;
+    let cancelled = false;
+
     async function loadLesson() {
       try {
-        console.log('🔍 Starting loadLesson, isPreview:', isPreview, 'slug:', slug);
-        
         let data;
         if (isPreview) {
           data = await getDraftLessonBySlug(slug);
@@ -253,16 +296,15 @@ export default function StudentLesson() {
           data = await getLessonBySlug(slug);
         }
         if (!data) throw new Error('Lesson not found');
-        console.log('📦 Lesson data:', data);
+        if (cancelled) return;
         setLesson(data);
 
         const loadedVocabulary = await listVocabulary(data.id);
-        console.log('📚 Vocabulary loaded:', loadedVocabulary);
+        if (cancelled) return;
         setVocabulary(loadedVocabulary || []);
 
         let loadedSections = await listSections(data.id);
         const allActivities = await listActivities(data.id);
-        console.log('📊 All activities loaded:', allActivities);
 
         const activitiesBySection = {};
         allActivities.forEach(act => {
@@ -274,68 +316,118 @@ export default function StudentLesson() {
         Object.keys(activitiesBySection).forEach(secId => {
           activitiesBySection[secId].sort((a, b) => (a.position || 0) - (b.position || 0));
         });
-
         loadedSections = loadedSections.map(section => ({
           ...section,
           activities: activitiesBySection[section.id] || []
         }));
-        console.log('📚 Final sections with activities:', loadedSections);
+        if (cancelled) return;
         setSections(loadedSections || []);
 
-        if (!isPreview) {
-          const storedName = localStorage.getItem(`smiley_student_name_${slug}`);
-          if (storedName) {
-            setStudentName(storedName);
-            setNameSubmitted(true);
-            setShowInstructions(true);
-            try {
-              await setStudentName(storedName);
-              const existing = await getSubmissionByLessonStudent(data.id, storedName);
-              if (existing) {
-                console.log('📋 Found existing submission:', existing.id);
-                setSubmissionId(existing.id);
-                setCurrentPage(existing.current_page || 0);
-                setAnswers(existing.answers || {});
-                if (existing.submitted_at) {
-                  setIsSubmitted(true);
-                  setScore(existing.score);
-                }
+        if (isPreview) return;
+
+        if (isAuthenticatedStudent) {
+          const name = authDisplayName || user.email || 'Student';
+          setStudentName(name);
+          setNameSubmitted(true);
+
+          try {
+            const existing = await findMySubmission({
+              lessonId: data.id,
+              assignmentId,
+              assignmentItemId,
+            });
+            if (cancelled) return;
+            if (existing) {
+              setSubmissionId(existing.id);
+              setCurrentPage(existing.current_page || 0);
+              setAnswers(existing.answers || {});
+              if (existing.submitted_at) {
+                setIsSubmitted(true);
+                setScore(existing.score);
+                setShowInstructions(false);
               } else {
-                console.log('ℹ️ No existing submission found');
+                setShowInstructions(false);
               }
-            } catch (err) {
-              console.warn('⚠️ Could not fetch existing submission on load:', err);
+            } else {
+              setShowInstructions(true);
             }
+          } catch (err) {
+            console.error('Auth submission lookup failed:', err);
+          }
+          return;
+        }
+
+        const storedName = localStorage.getItem(`smiley_student_name_${slug}`);
+        if (storedName) {
+          setStudentName(storedName);
+          setNameSubmitted(true);
+          setShowInstructions(true);
+          try {
+            await setStudentName(storedName);
+            const existing = await getSubmissionByLessonStudent(data.id, storedName);
+            if (cancelled) return;
+            if (existing) {
+              setSubmissionId(existing.id);
+              setCurrentPage(existing.current_page || 0);
+              setAnswers(existing.answers || {});
+              if (existing.submitted_at) {
+                setIsSubmitted(true);
+                setScore(existing.score);
+              }
+            }
+          } catch (err) {
+            console.warn('⚠️ Could not fetch existing submission on load:', err);
           }
         }
       } catch (err) {
         console.error('❌ Error loading lesson:', err);
-        setError(err.message);
+        if (!cancelled) setError(err.message);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     }
     loadLesson();
-  }, [slug, isPreview]);
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    slug,
+    isPreview,
+    authLoading,
+    user?.id,
+    role,
+    authDisplayName,
+    assignmentId,
+    assignmentItemId,
+    isAuthenticatedStudent,
+  ]);
 
-  // Auto-save
+  const persistSubmission = useCallback(
+    async (patch) => {
+      if (!submissionId) throw new Error('No submission');
+      if (isAuthenticatedStudent) {
+        return await updateMySubmission(submissionId, patch);
+      }
+      return await saveSubmission(submissionId, patch, studentName);
+    },
+    [submissionId, isAuthenticatedStudent, studentName]
+  );
+
   const saveDraft = useCallback(async () => {
     if (isPreview || isSubmitted || !submissionId) return;
     if (isSaving.current) return;
-
     isSaving.current = true;
     try {
-      await saveSubmission(submissionId, {
+      await persistSubmission({
         current_page: currentPage,
         answers,
-      }, studentName);
-      console.log('✅ Auto-save successful');
+      });
     } catch (err) {
       console.error('❌ Auto-save failed:', err);
     } finally {
       isSaving.current = false;
     }
-  }, [isPreview, isSubmitted, submissionId, currentPage, answers, studentName]);
+  }, [isPreview, isSubmitted, submissionId, currentPage, answers, persistSubmission]);
 
   useEffect(() => {
     if (!submissionId || isPreview || isSubmitted) return;
@@ -344,7 +436,6 @@ export default function StudentLesson() {
     return () => clearTimeout(saveTimer.current);
   }, [saveDraft, submissionId, isPreview, isSubmitted, answers, currentPage]);
 
-  // ---- Autofocus ----
   useEffect(() => {
     if (loading || sections.length === 0) return;
     const container = activitiesContainerRef.current;
@@ -357,15 +448,9 @@ export default function StudentLesson() {
     });
   }, [currentPage, sections, loading]);
 
-  // ---- Prevent copying ----
   useEffect(() => {
     if (!isSubmitted) return;
-
-    const handleContextMenu = (e) => {
-      e.preventDefault();
-      return false;
-    };
-
+    const handleContextMenu = (e) => { e.preventDefault(); return false; };
     const handleKeyDown = (e) => {
       if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'v' || e.key === 'p')) {
         e.preventDefault();
@@ -376,17 +461,33 @@ export default function StudentLesson() {
         return false;
       }
     };
-
     document.addEventListener('contextmenu', handleContextMenu);
     document.addEventListener('keydown', handleKeyDown);
-
     return () => {
       document.removeEventListener('contextmenu', handleContextMenu);
       document.removeEventListener('keydown', handleKeyDown);
     };
   }, [isSubmitted]);
 
-  // ---- handleNameSubmit ----
+  const handleStartFromInstructions = async () => {
+    if (isAuthenticatedStudent && !submissionId) {
+      try {
+        const created = await createMySubmission({
+          lessonId: lesson.id,
+          assignmentId,
+          assignmentItemId,
+          displayName: studentName,
+        });
+        setSubmissionId(created.id);
+      } catch (err) {
+        console.error(err);
+        toast.error('Could not start lesson: ' + err.message);
+        return;
+      }
+    }
+    setShowInstructions(false);
+  };
+
   const handleNameSubmit = async (e) => {
     e.preventDefault();
     const trimmedName = studentName.trim().toLowerCase();
@@ -398,17 +499,13 @@ export default function StudentLesson() {
     if (!isPreview) {
       try {
         await setStudentName(trimmedName);
-
         const existing = await getSubmissionByLessonStudent(lesson.id, trimmedName);
-
         if (existing && existing.status === 'in_progress') {
-          console.log('✅ Resuming in-progress submission:', existing.id);
           setSubmissionId(existing.id);
           setCurrentPage(existing.current_page || 0);
           setAnswers(existing.answers || {});
           return;
         }
-
         if (existing && existing.status === 'completed') {
           const startNew = await confirm({
             title: 'Start New Attempt?',
@@ -423,7 +520,6 @@ export default function StudentLesson() {
             return;
           }
         }
-
         let attempt = await getNextAttemptNumber(lesson.id, trimmedName);
         let inserted = false;
         let maxRetries = 10;
@@ -437,14 +533,12 @@ export default function StudentLesson() {
               {},
               'in_progress'
             );
-            console.log(`✅ New submission created (attempt ${attempt}):`, data.id);
             setSubmissionId(data.id);
             inserted = true;
           } catch (err) {
             if (err.code === '23505' || (err.message && err.message.includes('duplicate key'))) {
               attempt++;
               maxRetries--;
-              console.log(`⚠️ Attempt ${attempt-1} already exists, trying ${attempt}`);
             } else {
               throw err;
             }
@@ -463,10 +557,7 @@ export default function StudentLesson() {
   };
 
   const handleAnswerChange = (activityId, value) => {
-    setAnswers((prev) => ({
-      ...prev,
-      [activityId]: value,
-    }));
+    setAnswers((prev) => ({ ...prev, [activityId]: value }));
   };
 
   const goToPage = (index) => {
@@ -475,52 +566,30 @@ export default function StudentLesson() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // Handle final submission
   const handleFinalSubmit = async () => {
-    if (isPreview || isSubmitted) {
-      console.warn('⚠️ Cannot submit: preview or already submitted');
-      return;
-    }
+    if (isPreview || isSubmitted) return;
     if (!submissionId) {
       toast.error('No submission found. Please restart the lesson.');
       return;
     }
-
     setIsSubmitting(true);
-
     try {
       let totalScore = 0;
       let maxAutoScore = 0;
       const gradedAnswers = { ...answers };
-
       sections.forEach((section) => {
         (section.activities || []).forEach((activity) => {
           let result = null;
           const userValue = gradedAnswers[activity.id] || '';
           switch (activity.type) {
-            case 'gap_fill':
-              result = gradeGapFill(activity.config, userValue);
-              break;
-            case 'multiple_choice':
-              result = gradeMultipleChoice(activity.config, userValue);
-              break;
-            case 'gap_fill_dropdown':
-              result = gradeGapFillDropdown(activity.config, userValue);
-              break;
-            case 'sentence_jumble':
-              result = gradeSentenceJumble(activity.config, userValue);
-              break;
-            case 'vocabulary_matching':
-              result = gradeVocabularyMatching(activity.config, userValue);
-              break;
-            case 'listening':
-              result = gradeListening(activity.config, userValue);
-              break;
-            case 'dictation':
-              result = gradeDictation(activity.config, userValue);
-              break;
-            default:
-              return;
+            case 'gap_fill': result = gradeGapFill(activity.config, userValue); break;
+            case 'multiple_choice': result = gradeMultipleChoice(activity.config, userValue); break;
+            case 'gap_fill_dropdown': result = gradeGapFillDropdown(activity.config, userValue); break;
+            case 'sentence_jumble': result = gradeSentenceJumble(activity.config, userValue); break;
+            case 'vocabulary_matching': result = gradeVocabularyMatching(activity.config, userValue); break;
+            case 'listening': result = gradeListening(activity.config, userValue); break;
+            case 'dictation': result = gradeDictation(activity.config, userValue); break;
+            default: return;
           }
           if (result) {
             gradedAnswers[`${activity.id}_graded`] = result;
@@ -529,23 +598,16 @@ export default function StudentLesson() {
           }
         });
       });
-
       const finalScore = maxAutoScore > 0 ? Math.round((totalScore / maxAutoScore) * 100) : 0;
-      console.log(`📊 Final score: ${finalScore}% (${totalScore}/${maxAutoScore})`);
 
-      const nameToUse = studentName || localStorage.getItem(`smiley_student_name_${slug}`);
-      if (!nameToUse) {
-        throw new Error('Student name not found. Please refresh and try again.');
-      }
-
-      await saveSubmission(submissionId, {
+      await persistSubmission({
         current_page: currentPage,
         answers: gradedAnswers,
         submitted_at: new Date().toISOString(),
         score: finalScore,
         max_auto_score: maxAutoScore,
-        status: 'completed'
-      }, nameToUse);
+        status: 'completed',
+      });
 
       setAnswers(gradedAnswers);
       setIsSubmitted(true);
@@ -553,40 +615,46 @@ export default function StudentLesson() {
       toast.success('✅ Submission completed successfully!');
     } catch (err) {
       console.error('❌ Final submission failed:', err);
-      toast.error(`Failed to submit: ${err.message || 'Unknown error'}\n\nPlease check your internet connection and try again. If the problem persists, contact support.`);
+      toast.error(`Failed to submit: ${err.message || 'Unknown error'}`);
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // ---- Save & Exit handler ----
   const handleSaveAndExit = useCallback(async () => {
-    if (!submissionId) {
-      console.warn('⚠️ Cannot save: no submission ID');
-      return;
-    }
+    if (!submissionId) return;
     try {
-      await saveSubmission(submissionId, {
+      await persistSubmission({
         current_page: currentPage,
         answers,
-      }, studentName);
-      console.log('✅ Saved before exit');
-      localStorage.removeItem(`smiley_student_name_${slug}`);
-      window.location.href = `/lesson/${slug}`;
+      });
+      if (!isAuthenticatedStudent) {
+        localStorage.removeItem(`smiley_student_name_${slug}`);
+        window.location.href = `/lesson/${slug}`;
+      } else if (assignmentId) {
+        window.location.href = `/student/assignments/${assignmentId}`;
+      } else {
+        window.location.href = '/student';
+      }
     } catch (err) {
       console.error('❌ Save & Exit failed:', err);
       toast.error('Failed to save progress. Please try again.');
     }
-  }, [submissionId, currentPage, answers, slug, studentName]);
+  }, [
+    submissionId,
+    currentPage,
+    answers,
+    slug,
+    isAuthenticatedStudent,
+    assignmentId,
+    persistSubmission,
+  ]);
 
-  // Render activity player
   const renderActivity = (activity, index) => {
     if (!activity || !activity.type) {
       return <div className="text-red-500">Invalid activity</div>;
     }
-
     const questionNumber = index + 1;
-    
     let prompt = '';
     if (language === 'en') {
       prompt = activity.prompt_en || activity.prompt || '';
@@ -594,7 +662,6 @@ export default function StudentLesson() {
       prompt = activity.prompt_ja || '';
     }
     if (!prompt) prompt = activity.prompt_en || activity.prompt || '';
-    
     const displayPrompt = prompt ? `Q${questionNumber}. ${prompt}` : `Q${questionNumber}`;
     const activityWithPrompt = { ...activity, prompt: displayPrompt };
 
@@ -614,35 +681,19 @@ export default function StudentLesson() {
       const displayOptions = options && options.length > 0 && options.some(o => o) ? options : config.options_en || [];
       const activityWithLanguage = {
         ...activityWithPrompt,
-        config: {
-          ...config,
-          options: displayOptions,
-          correctIndex: config.correctIndex
-        }
+        config: { ...config, options: displayOptions, correctIndex: config.correctIndex }
       };
       return <MultipleChoicePlayer {...commonProps} activity={activityWithLanguage} />;
     }
-
-    if (activity.type === 'gap_fill') {
-      return <GapFillPlayer {...commonProps} />;
-    }
-    if (activity.type === 'gap_fill_dropdown') {
-      return <GapFillDropdownPlayer {...commonProps} />;
-    }
-
+    if (activity.type === 'gap_fill') return <GapFillPlayer {...commonProps} />;
+    if (activity.type === 'gap_fill_dropdown') return <GapFillDropdownPlayer {...commonProps} />;
     switch (activity.type) {
-      case 'short_answer':
-        return <ShortAnswerPlayer {...commonProps} />;
-      case 'reasoning':
-        return <ReasoningPlayer {...commonProps} />;
-      case 'sentence_jumble':
-        return <SentenceJumblePlayer {...commonProps} onSubmit={() => {}} />;
-      case 'vocabulary_matching':
-        return <VocabularyMatchingPlayer {...commonProps} />;
-      case 'listening':
-        return <ListeningPlayer {...commonProps} />;
-      case 'dictation':
-        return <DictationPlayer {...commonProps} />;
+      case 'short_answer': return <ShortAnswerPlayer {...commonProps} />;
+      case 'reasoning': return <ReasoningPlayer {...commonProps} />;
+      case 'sentence_jumble': return <SentenceJumblePlayer {...commonProps} onSubmit={() => {}} />;
+      case 'vocabulary_matching': return <VocabularyMatchingPlayer {...commonProps} />;
+      case 'listening': return <ListeningPlayer {...commonProps} />;
+      case 'dictation': return <DictationPlayer {...commonProps} />;
       default:
         return (
           <div className="text-red-500 p-2 bg-red-50 rounded">
@@ -652,8 +703,7 @@ export default function StudentLesson() {
     }
   };
 
-  // ---------- Loading ----------
-  if (loading) {
+  if (loading || authLoading) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-warm-50">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600"></div>
@@ -661,7 +711,6 @@ export default function StudentLesson() {
     );
   }
 
-  // ---------- Error ----------
   if (error) {
     return (
       <div className="flex items-center justify-center min-h-screen p-6 bg-warm-50">
@@ -673,7 +722,6 @@ export default function StudentLesson() {
     );
   }
 
-  // ---------- Welcome / Name entry ----------
   if (!nameSubmitted) {
     return (
       <div className="min-h-screen flex items-center justify-center p-6 bg-warm-50">
@@ -689,9 +737,7 @@ export default function StudentLesson() {
                 </span>
               </div>
             )}
-            <p className="mt-4 text-sm text-warm-600">
-              {t.enterNamePrompt}
-            </p>
+            <p className="mt-4 text-sm text-warm-600">{t.enterNamePrompt}</p>
             <div className="mt-3 text-xs text-warm-500 border-t border-warm-200 pt-3">
               <p dangerouslySetInnerHTML={{ __html: t.enterNameImportant }} />
               <p className="mt-1">{t.enterNameAutoSave}</p>
@@ -701,7 +747,7 @@ export default function StudentLesson() {
           <div className="flex justify-center mb-4">
             <div className="inline-flex rounded-full border border-warm-200 overflow-hidden">
               <button
-                onClick={() => { setLanguage('en'); localStorage.setItem('preferred_language', 'en'); }}
+                onClick={() => setLanguagePersist('en')}
                 className={`px-4 py-1 text-sm font-medium transition ${
                   language === 'en' ? 'bg-primary-600 text-white' : 'bg-transparent text-warm-600 hover:bg-warm-100'
                 }`}
@@ -709,7 +755,7 @@ export default function StudentLesson() {
                 English
               </button>
               <button
-                onClick={() => { setLanguage('ja'); localStorage.setItem('preferred_language', 'ja'); }}
+                onClick={() => setLanguagePersist('ja')}
                 className={`px-4 py-1 text-sm font-medium transition ${
                   language === 'ja' ? 'bg-primary-600 text-white' : 'bg-transparent text-warm-600 hover:bg-warm-100'
                 }`}
@@ -734,10 +780,7 @@ export default function StudentLesson() {
               autoFocus
               required
             />
-            <button
-              type="submit"
-              className="w-full btn-primary py-3 text-base"
-            >
+            <button type="submit" className="w-full btn-primary py-3 text-base">
               {t.startButton}
             </button>
           </form>
@@ -746,24 +789,22 @@ export default function StudentLesson() {
     );
   }
 
-  // ---------- Instructions ----------
   if (showInstructions) {
     const totalActivities = sections.reduce((acc, sec) => acc + (sec.activities || []).length, 0);
     return (
       <div className="min-h-screen flex items-center justify-center p-6 bg-warm-50">
+        <FloatingLanguageToggle language={language} onChange={setLanguagePersist} />
         <div className="card p-8 max-w-2xl w-full">
           <div className="text-center mb-6">
             <h1 className="text-3xl font-bold text-warm-900 mb-2">
               {t.instructionsTitle(lesson.title, lesson.level, sections.length, totalActivities)}
             </h1>
           </div>
-
           <div className="space-y-4 text-warm-700">
             <div className="bg-primary-50 p-4 rounded-card">
               <h3 className="font-semibold text-primary-800">{t.aboutLesson}</h3>
               <p className="text-sm mt-1">{t.aboutLessonText(sections.length)}</p>
             </div>
-
             <div className="bg-green-50 p-4 rounded-card">
               <h3 className="font-semibold text-green-800">{t.navigation}</h3>
               <ul className="text-sm list-disc list-inside mt-1 space-y-1">
@@ -772,7 +813,6 @@ export default function StudentLesson() {
                 ))}
               </ul>
             </div>
-
             <div className="bg-yellow-50 p-4 rounded-card">
               <h3 className="font-semibold text-yellow-800">{t.referenceDrawer}</h3>
               <ul className="text-sm list-disc list-inside mt-1 space-y-1">
@@ -786,71 +826,9 @@ export default function StudentLesson() {
                 </span>
               </div>
             </div>
-
-            <div className="bg-purple-50 p-4 rounded-card">
-              <h3 className="font-semibold text-purple-800">
-                {t.activityTypes}
-              </h3>
-              <ul className="text-sm list-disc list-inside mt-1 space-y-1">
-                {(() => {
-                  const typeCounts = {};
-                  sections.forEach(section => {
-                    (section.activities || []).forEach(act => {
-                      const type = act.type;
-                      typeCounts[type] = (typeCounts[type] || 0) + 1;
-                    });
-                  });
-
-                  const typeLabels = {
-                    en: {
-                      gap_fill: 'Gap Fill',
-                      multiple_choice: 'Multiple Choice',
-                      short_answer: 'Short Answer',
-                      reasoning: 'Reasoning',
-                      gap_fill_dropdown: 'Gap Fill (Dropdown)',
-                      sentence_jumble: 'Sentence Jumble',
-                      vocabulary_matching: 'Vocabulary Matching',
-                      listening: 'Listening',
-                      dictation: 'Dictation',
-                    },
-                    ja: {
-                      gap_fill: '穴埋め',
-                      multiple_choice: '選択問題',
-                      short_answer: '記述問題',
-                      reasoning: '論述問題',
-                      gap_fill_dropdown: '穴埋め（ドロップダウン）',
-                      sentence_jumble: '並べ替え',
-                      vocabulary_matching: '語彙マッチング',
-                      listening: 'リスニング',
-                      dictation: 'ディクテーション',
-                    }
-                  };
-
-                  const items = Object.entries(typeCounts)
-                    .sort((a, b) => a[0].localeCompare(b[0]))
-                    .map(([type, count]) => {
-                      const label = typeLabels[language]?.[type] || type;
-                      const countLabel = language === 'ja'
-                        ? `${count} アクティビティ`
-                        : `${count} ${count === 1 ? 'activity' : 'activities'}`;
-                      return (
-                        <li key={type}>
-                          <span className="font-medium">{label}</span> – {countLabel}
-                        </li>
-                      );
-                    });
-
-                  return items.length > 0 ? items : <li>{language === 'ja' ? 'アクティビティがありません' : 'No activities'}</li>;
-                })()}
-              </ul>
-            </div>
           </div>
-
           <div className="mt-8 flex justify-center">
-            <button
-              onClick={() => setShowInstructions(false)}
-              className="btn-primary text-lg py-3 px-8"
-            >
+            <button onClick={handleStartFromInstructions} className="btn-primary text-lg py-3 px-8">
               {t.startLessonButton}
             </button>
           </div>
@@ -859,42 +837,33 @@ export default function StudentLesson() {
     );
   }
 
-  // ---------- Results ----------
   if (isSubmitted) {
     const allActivities = sections.flatMap(s => s.activities || []);
     const answerSummary = allActivities.map((act, idx) => {
       const qNum = idx + 1;
       const rawAnswer = answers[act.id];
       let displayAnswer = '—';
-      
       if (rawAnswer !== undefined && rawAnswer !== '') {
         switch (act.type) {
           case 'multiple_choice': {
             const options = act.config?.options_en || act.config?.options || [];
             const selectedIndex = parseInt(rawAnswer, 10);
-            displayAnswer = (selectedIndex >= 0 && selectedIndex < options.length) 
-              ? options[selectedIndex] 
-              : rawAnswer;
+            displayAnswer = (selectedIndex >= 0 && selectedIndex < options.length) ? options[selectedIndex] : rawAnswer;
             break;
           }
           case 'gap_fill_dropdown': {
             const indices = rawAnswer.split(',').map(s => parseInt(s.trim(), 10));
             const options = act.config?.dropdownOptions || [];
-            const selectedWords = indices.map((idx, i) => {
-              const opts = options[i] || [];
-              return (idx >= 0 && idx < opts.length) ? opts[idx] : '—';
-            });
-            displayAnswer = selectedWords.join(', ');
+            displayAnswer = indices.map((i, ii) => {
+              const opts = options[ii] || [];
+              return (i >= 0 && i < opts.length) ? opts[i] : '—';
+            }).join(', ');
             break;
           }
           case 'sentence_jumble': {
             const indices = rawAnswer.split(',').map(s => parseInt(s.trim(), 10));
             const words = act.config?.words || [];
-            const orderedWords = indices.map(idx => {
-              const word = words[idx] || '?';
-              return stripPunctuation(word);
-            });
-            displayAnswer = orderedWords.join(' ');
+            displayAnswer = indices.map(i => stripPunctuation(words[i] || '?')).join(' ');
             break;
           }
           case 'vocabulary_matching': {
@@ -902,30 +871,18 @@ export default function StudentLesson() {
               const matches = JSON.parse(rawAnswer);
               const pairs = act.config?.pairs || [];
               const matchStrings = Object.entries(matches)
-                .filter(([termIdx, defIdx]) => {
-                  const t = parseInt(termIdx, 10);
-                  const d = parseInt(defIdx, 10);
-                  return !isNaN(t) && !isNaN(d) && t >= 0 && t < pairs.length && d >= 0 && d < pairs.length;
+                .filter(([t, d]) => {
+                  const ti = parseInt(t, 10);
+                  const di = parseInt(d, 10);
+                  return !isNaN(ti) && !isNaN(di) && ti >= 0 && ti < pairs.length && di >= 0 && di < pairs.length;
                 })
-                .map(([termIdx, defIdx]) => {
-                  const t = parseInt(termIdx, 10);
-                  const d = parseInt(defIdx, 10);
-                  return `${pairs[t].term} → ${pairs[d].definition}`;
+                .map(([t, d]) => {
+                  const ti = parseInt(t, 10);
+                  const di = parseInt(d, 10);
+                  return `${pairs[ti].term} → ${pairs[di].definition}`;
                 });
-              const wrongMatches = Object.entries(matches)
-                .filter(([termIdx, defIdx]) => {
-                  const d = parseInt(defIdx, 10);
-                  return d === -1;
-                })
-                .map(([termIdx]) => {
-                  const t = parseInt(termIdx, 10);
-                  return `${pairs[t].term} → (wrong attempt)`;
-                });
-              const allMatches = [...matchStrings, ...wrongMatches];
-              displayAnswer = allMatches.length > 0 ? allMatches.join('; ') : 'No matches made';
-            } catch {
-              displayAnswer = rawAnswer;
-            }
+              displayAnswer = matchStrings.length > 0 ? matchStrings.join('; ') : 'No matches made';
+            } catch { displayAnswer = rawAnswer; }
             break;
           }
           case 'listening': {
@@ -933,55 +890,34 @@ export default function StudentLesson() {
               const answersObj = JSON.parse(rawAnswer);
               const questions = act.config?.questions || [];
               const parts = Object.entries(answersObj)
-                .filter(([qIdx, val]) => val !== undefined && val !== -1)
+                .filter(([, val]) => val !== undefined && val !== -1)
                 .map(([qIdx, val]) => {
                   const q = questions[parseInt(qIdx)] || {};
                   const opt = q.options ? q.options[val] : (val === 0 ? 'True' : 'False');
                   return `Q${parseInt(qIdx) + 1}: ${opt}`;
                 });
               displayAnswer = parts.length > 0 ? parts.join('; ') : 'No answers';
-            } catch {
-              displayAnswer = rawAnswer;
-            }
+            } catch { displayAnswer = rawAnswer; }
             break;
           }
-          case 'dictation':
-            displayAnswer = rawAnswer;
-            break;
-          case 'gap_fill':
-          case 'short_answer':
-          case 'reasoning':
-          default:
-            displayAnswer = rawAnswer;
-            break;
+          default: displayAnswer = rawAnswer;
         }
       }
-
       const gradedKey = act.id + '_graded';
       const graded = answers[gradedKey];
       let statusText = '';
       let statusClass = '';
       let scoreDisplay = '';
-
       const autoGradedTypes = ['gap_fill', 'multiple_choice', 'gap_fill_dropdown', 'sentence_jumble', 'vocabulary_matching', 'listening', 'dictation'];
-
       if (autoGradedTypes.includes(act.type)) {
         if (graded) {
           const earned = graded.score || 0;
           const max = graded.maxScore || 0;
           const percent = max > 0 ? (earned / max) * 100 : 0;
           scoreDisplay = `${earned}/${max}`;
-
-          if (percent === 100) {
-            statusText = t.statusFull;
-            statusClass = 'bg-green-100 text-green-700';
-          } else if (percent === 0) {
-            statusText = t.statusZero;
-            statusClass = 'bg-red-100 text-red-700';
-          } else {
-            statusText = t.statusPartial;
-            statusClass = 'bg-yellow-100 text-yellow-700';
-          }
+          if (percent === 100) { statusText = t.statusFull; statusClass = 'bg-green-100 text-green-700'; }
+          else if (percent === 0) { statusText = t.statusZero; statusClass = 'bg-red-100 text-red-700'; }
+          else { statusText = t.statusPartial; statusClass = 'bg-yellow-100 text-yellow-700'; }
         } else {
           statusText = t.statusNoGrade;
           statusClass = 'bg-gray-100 text-gray-700';
@@ -990,84 +926,82 @@ export default function StudentLesson() {
       } else {
         statusText = t.statusReview;
         statusClass = 'bg-blue-100 text-blue-700';
-        scoreDisplay = '';
       }
-
       const promptForDisplay = (language === 'en' ? act.prompt_en : act.prompt_ja) || act.prompt || '';
       return { qNum, prompt: promptForDisplay, answer: displayAnswer, statusText, statusClass, scoreDisplay };
     });
 
     return (
       <div className="min-h-screen p-6 bg-warm-50">
-        <div className="max-w-2xl mx-auto card p-8">
-          <div className="text-center">
-            <div className="text-6xl mb-4">🎉</div>
-            <h2 className="text-3xl font-bold text-warm-900 mb-2">
-              {t.wellDone}
-            </h2>
-            {score !== null && (
-              <div className="inline-block bg-primary-100 text-primary-800 text-2xl font-bold px-6 py-3 rounded-full mt-2">
-                {score}%
-              </div>
-            )}
-            <p className="text-warm-600 mt-4">
-              {t.thankYou}
-            </p>
-
-            <button
-              onClick={() => setShowAnswers(!showAnswers)}
-              className="mt-6 btn-primary"
-            >
-              {showAnswers ? t.hideAnswers : t.seeAnswers}
-            </button>
-
-            <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-card text-sm text-yellow-800">
-              {t.integrityWarning}
-            </div>
-          </div>
-
-          {showAnswers && (
-            <div className="mt-6 border-t border-warm-200 pt-4">
-              <h3 className="text-lg font-semibold text-warm-900 mb-2">{t.yourAnswers}</h3>
-              <div
-                className="space-y-3 max-h-96 overflow-y-auto select-none no-copy"
-                onCopy={(e) => e.preventDefault()}
-                onContextMenu={(e) => e.preventDefault()}
-                style={{ userSelect: 'none', WebkitUserSelect: 'none' }}
+        <FloatingLanguageToggle language={language} onChange={setLanguagePersist} />
+        <div className="max-w-2xl mx-auto">
+          {assignmentId && (
+            <div className="mb-4">
+              <a
+                href={`/student/assignments/${assignmentId}`}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-warm-300 text-warm-800 text-sm font-medium rounded-md hover:bg-warm-100 shadow-sm"
               >
-                {answerSummary.map((item) => (
-                  <div key={item.qNum} className="text-sm border-b border-warm-100 pb-3">
-                    <div className="flex justify-between items-start gap-2">
-                      <span className="font-medium text-warm-700">Q{item.qNum}:</span>
-                      <span className="text-warm-600 flex-1">{item.prompt}</span>
-                    </div>
-                    <div className="flex justify-between items-center mt-1 pl-4">
-                      <span className="text-warm-500 text-xs">{t.yourAnswerLabel}</span>
-                      <span className="font-mono text-sm text-warm-800 flex-1 ml-2">
-                        {item.answer}
-                      </span>
-                      <div className="flex items-center gap-2 ml-2">
-                        {item.scoreDisplay && (
-                          <span className="text-xs font-mono text-warm-600 bg-warm-100 px-2 py-0.5 rounded">
-                            {item.scoreDisplay}
-                          </span>
-                        )}
-                        <span className={`text-xs font-mono px-2 py-0.5 rounded-full whitespace-nowrap ${item.statusClass}`}>
-                          {item.statusText}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
+                {t.backToAssignment}
+              </a>
             </div>
           )}
+          <div className="card p-8">
+            <div className="text-center">
+              <div className="text-6xl mb-4">🎉</div>
+              <h2 className="text-3xl font-bold text-warm-900 mb-2">{t.wellDone}</h2>
+              {score !== null && (
+                <div className="inline-block bg-primary-100 text-primary-800 text-2xl font-bold px-6 py-3 rounded-full mt-2">
+                  {score}%
+                </div>
+              )}
+              <p className="text-warm-600 mt-4">{t.thankYou}</p>
+              <button onClick={() => setShowAnswers(!showAnswers)} className="mt-6 btn-primary">
+                {showAnswers ? t.hideAnswers : t.seeAnswers}
+              </button>
+              <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-card text-sm text-yellow-800">
+                {t.integrityWarning}
+              </div>
+            </div>
+            {showAnswers && (
+              <div className="mt-6 border-t border-warm-200 pt-4">
+                <h3 className="text-lg font-semibold text-warm-900 mb-2">{t.yourAnswers}</h3>
+                <div
+                  className="space-y-3 max-h-96 overflow-y-auto select-none no-copy"
+                  onCopy={(e) => e.preventDefault()}
+                  onContextMenu={(e) => e.preventDefault()}
+                  style={{ userSelect: 'none', WebkitUserSelect: 'none' }}
+                >
+                  {answerSummary.map((item) => (
+                    <div key={item.qNum} className="text-sm border-b border-warm-100 pb-3">
+                      <div className="flex justify-between items-start gap-2">
+                        <span className="font-medium text-warm-700">Q{item.qNum}:</span>
+                        <span className="text-warm-600 flex-1">{item.prompt}</span>
+                      </div>
+                      <div className="flex justify-between items-center mt-1 pl-4">
+                        <span className="text-warm-500 text-xs">{t.yourAnswerLabel}</span>
+                        <span className="font-mono text-sm text-warm-800 flex-1 ml-2">{item.answer}</span>
+                        <div className="flex items-center gap-2 ml-2">
+                          {item.scoreDisplay && (
+                            <span className="text-xs font-mono text-warm-600 bg-warm-100 px-2 py-0.5 rounded">
+                              {item.scoreDisplay}
+                            </span>
+                          )}
+                          <span className={`text-xs font-mono px-2 py-0.5 rounded-full whitespace-nowrap ${item.statusClass}`}>
+                            {item.statusText}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     );
   }
 
-  // ---------- No sections ----------
   if (!sections || sections.length === 0) {
     return (
       <div className="min-h-screen flex items-center justify-center p-6 bg-warm-50">
@@ -1078,7 +1012,6 @@ export default function StudentLesson() {
     );
   }
 
-  // ---------- Main player ----------
   const currentSection = sections[currentPage] || null;
   const totalPages = sections.length;
   const isFirstPage = currentPage === 0;
@@ -1109,11 +1042,7 @@ export default function StudentLesson() {
           </div>
           <div className="flex items-center gap-2 ml-4 flex-shrink-0">
             <button
-              onClick={() => {
-                const newLang = language === 'en' ? 'ja' : 'en';
-                setLanguage(newLang);
-                localStorage.setItem('preferred_language', newLang);
-              }}
+              onClick={() => setLanguagePersist(language === 'en' ? 'ja' : 'en')}
               className="text-xs bg-warm-200 hover:bg-warm-300 px-2 py-1 rounded-full transition"
             >
               {language === 'en' ? '日本語' : 'English'}
@@ -1122,11 +1051,7 @@ export default function StudentLesson() {
               {currentPage + 1} / {totalPages}
             </span>
             {!isPreview && submissionId && (
-              <SaveExitButton
-                onSave={handleSaveAndExit}
-                isLoading={false}
-                slug={slug}
-              />
+              <SaveExitButton onSave={handleSaveAndExit} isLoading={false} slug={slug} />
             )}
           </div>
         </div>
@@ -1147,28 +1072,19 @@ export default function StudentLesson() {
             </div>
 
             <div ref={activitiesContainerRef} className="space-y-6">
-              {(currentSection.activities || []).map((activity, idx) => {
-                return (
-                  <div
-                    key={activity.id}
-                    className="activity-card p-4 md:p-6"
-                  >
-                    {renderActivity(activity, idx)}
-                  </div>
-                );
-              })}
+              {(currentSection.activities || []).map((activity, idx) => (
+                <div key={activity.id} className="activity-card p-4 md:p-6">
+                  {renderActivity(activity, idx)}
+                </div>
+              ))}
             </div>
 
             <div className="flex flex-col sm:flex-row gap-3 pt-4">
               {!isFirstPage && (
-                <button
-                  onClick={() => goToPage(currentPage - 1)}
-                  className="flex-1 btn-secondary py-3 text-base"
-                >
+                <button onClick={() => goToPage(currentPage - 1)} className="flex-1 btn-secondary py-3 text-base">
                   ← Previous
                 </button>
               )}
-
               {isLastPage ? (
                 <button
                   onClick={handleFinalSubmit}
@@ -1182,10 +1098,7 @@ export default function StudentLesson() {
                   {isSubmitting ? 'Submitting...' : '📤 Submit Lesson'}
                 </button>
               ) : (
-                <button
-                  onClick={() => goToPage(currentPage + 1)}
-                  className="flex-1 btn-primary py-3 text-base"
-                >
+                <button onClick={() => goToPage(currentPage + 1)} className="flex-1 btn-primary py-3 text-base">
                   Next →
                 </button>
               )}

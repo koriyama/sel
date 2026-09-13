@@ -1,8 +1,9 @@
 // src/pages/TeacherClasses.jsx
 import React, { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { listMyClassesAsTeacher, createClass, deleteClass } from '../lib/lmsApi';
+import { useAuth } from '../context/AuthContext';
 
 const emptyForm = {
   name: '',
@@ -12,6 +13,8 @@ const emptyForm = {
 };
 
 const TeacherClasses = () => {
+  const { logout, user } = useAuth();
+  const navigate = useNavigate();
   const [classes, setClasses] = useState([]);
   const [loading, setLoading] = useState(true);
   const [form, setForm] = useState(emptyForm);
@@ -33,6 +36,11 @@ const TeacherClasses = () => {
   useEffect(() => {
     load();
   }, []);
+
+  const handleLogout = async () => {
+    await logout();
+    navigate('/login', { replace: true });
+  };
 
   const handleCreate = async (e) => {
     e.preventDefault();
@@ -76,76 +84,29 @@ const TeacherClasses = () => {
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="max-w-5xl mx-auto p-6">
-        <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
           <h1 className="text-2xl font-bold text-gray-900">My classes</h1>
-          <Link to="/" className="text-sm text-indigo-600 hover:text-indigo-500">
-            ← Back to dashboard
-          </Link>
+          <div className="flex items-center gap-4">
+            {user?.email && (
+              <span className="text-sm text-gray-500 hidden sm:inline">
+                {user.email}
+              </span>
+            )}
+            <Link to="/" className="text-sm text-indigo-600 hover:text-indigo-500">
+              ← Lesson Builder
+            </Link>
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="text-sm text-red-600 hover:text-red-800"
+            >
+              Logout
+            </button>
+          </div>
         </div>
 
-        <section className="bg-white rounded-lg shadow p-6 mb-8">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4">
-            Create a class
-          </h2>
-          <form onSubmit={handleCreate} className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-gray-700">
-                Name
-              </label>
-              <input
-                type="text"
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-                placeholder="e.g. Academic Writing II"
-              />
-            </div>
-            <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-gray-700">
-                Description (optional)
-              </label>
-              <textarea
-                rows={2}
-                value={form.description}
-                onChange={(e) => setForm({ ...form, description: e.target.value })}
-                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700">
-                Start date
-              </label>
-              <input
-                type="date"
-                value={form.start_date}
-                onChange={(e) => setForm({ ...form, start_date: e.target.value })}
-                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700">
-                End date
-              </label>
-              <input
-                type="date"
-                value={form.end_date}
-                onChange={(e) => setForm({ ...form, end_date: e.target.value })}
-                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-              />
-            </div>
-            <div className="md:col-span-2">
-              <button
-                type="submit"
-                disabled={saving}
-                className="inline-flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
-              >
-                {saving ? 'Creating…' : 'Create class'}
-              </button>
-            </div>
-          </form>
-        </section>
-
-        <section className="bg-white rounded-lg shadow">
+        {/* ---- Classes list first ---- */}
+        <section className="bg-white rounded-lg shadow mb-8">
           <div className="px-6 py-4 border-b border-gray-100">
             <h2 className="text-lg font-semibold text-gray-900">
               Classes ({classes.length})
@@ -154,7 +115,7 @@ const TeacherClasses = () => {
           {loading ? (
             <p className="p-6 text-gray-500">Loading…</p>
           ) : classes.length === 0 ? (
-            <p className="p-6 text-gray-500">No classes yet. Create one above.</p>
+            <p className="p-6 text-gray-500">No classes yet. Create one below.</p>
           ) : (
             <ul className="divide-y divide-gray-100">
               {classes.map((c) => (
@@ -186,6 +147,61 @@ const TeacherClasses = () => {
               ))}
             </ul>
           )}
+        </section>
+
+        {/* ---- Create form below ---- */}
+        <section className="bg-white rounded-lg shadow p-6">
+          <h2 className="text-lg font-semibold text-gray-900 mb-4">Create a class</h2>
+          <form onSubmit={handleCreate} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="md:col-span-2">
+              <label className="block text-sm font-medium text-gray-700">Name</label>
+              <input
+                type="text"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                placeholder="e.g. Academic Writing II"
+              />
+            </div>
+            <div className="md:col-span-2">
+              <label className="block text-sm font-medium text-gray-700">
+                Description (optional)
+              </label>
+              <textarea
+                rows={2}
+                value={form.description}
+                onChange={(e) => setForm({ ...form, description: e.target.value })}
+                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700">Start date</label>
+              <input
+                type="date"
+                value={form.start_date}
+                onChange={(e) => setForm({ ...form, start_date: e.target.value })}
+                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700">End date</label>
+              <input
+                type="date"
+                value={form.end_date}
+                onChange={(e) => setForm({ ...form, end_date: e.target.value })}
+                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+              />
+            </div>
+            <div className="md:col-span-2">
+              <button
+                type="submit"
+                disabled={saving}
+                className="inline-flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {saving ? 'Creating…' : 'Create class'}
+              </button>
+            </div>
+          </form>
         </section>
       </div>
     </div>

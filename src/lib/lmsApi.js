@@ -1,9 +1,8 @@
 // src/lib/lmsApi.js
 import { supabase } from './supabaseClient';
+import { defaultClassColor } from './calendarApi';
 
 // Convert an institutional ID to the internal Supabase Auth email.
-// MUST match the exact same logic in the admin-student-manager Edge Function.
-// Example: "1234-5678" becomes "12345678@students.local".
 export function institutionalIdToEmail(institutionalId) {
   if (!institutionalId) return '';
   const safe = String(institutionalId).toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -48,7 +47,7 @@ export async function listMyClassesAsTeacher() {
 export async function listMyClassesAsStudent() {
   const { data, error } = await supabase
     .from('class_members')
-    .select('class_id, classes(id, name, description, start_date, end_date)')
+    .select('class_id, classes(id, name, description, start_date, end_date, color)')
     .order('enrolled_at', { ascending: false });
   if (error) throw error;
   return (data || []).map((row) => row.classes).filter(Boolean);
@@ -58,6 +57,13 @@ export async function createClass({ name, description, start_date, end_date }) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error('Not logged in');
 
+  const { count } = await supabase
+    .from('classes')
+    .select('id', { count: 'exact', head: true })
+    .eq('teacher_id', user.id);
+
+  const color = defaultClassColor(count || 0);
+
   const { data, error } = await supabase
     .from('classes')
     .insert({
@@ -66,6 +72,7 @@ export async function createClass({ name, description, start_date, end_date }) {
       description: description?.trim() || null,
       start_date: start_date || null,
       end_date: end_date || null,
+      color,
     })
     .select()
     .single();

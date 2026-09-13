@@ -1,34 +1,24 @@
 // src/pages/LessonResults.jsx
 import { useEffect, useState } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, useSearchParams, Link } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import { useConfirm } from '../context/ConfirmContext'
 import { getLesson, getResultsForLesson, deleteSubmissions, listSections } from '../lib/api'
 import { supabase } from '../lib/supabaseClient'
 
-// ---------- Helper to format a stored answer based on activity type ----------
 function formatResponseText(activityType, storedValue, config) {
-  if (storedValue === undefined || storedValue === null || storedValue === '') {
-    return ''
-  }
-
+  if (storedValue === undefined || storedValue === null || storedValue === '') return ''
   const value = String(storedValue)
-
   switch (activityType) {
     case 'multiple_choice': {
       let options = config?.options_en || config?.options_ja || config?.options || []
-      if (!Array.isArray(options) || options.length === 0) {
-        options = config?.options_ja || []
-      }
+      if (!Array.isArray(options) || options.length === 0) options = config?.options_ja || []
       if (Array.isArray(options) && options.length > 0) {
         const idx = parseInt(value, 10)
-        if (!isNaN(idx) && idx >= 0 && idx < options.length) {
-          return options[idx]
-        }
+        if (!isNaN(idx) && idx >= 0 && idx < options.length) return options[idx]
       }
       return value
     }
-
     case 'gap_fill_dropdown': {
       const dropdownOptions = config?.dropdownOptions || []
       const indices = value.split(',').map(s => parseInt(s.trim(), 10))
@@ -38,52 +28,37 @@ function formatResponseText(activityType, storedValue, config) {
       })
       return chosenWords.join(', ')
     }
-
     case 'sentence_jumble': {
       const words = config?.words || []
       const indices = value.split(',').map(s => parseInt(s.trim(), 10))
-      const orderedWords = indices.map(idx => {
+      return indices.map(idx => {
         const word = (idx >= 0 && idx < words.length) ? words[idx] : '?'
         return word.replace(/[.,!?;:"]$/, '')
-      })
-      return orderedWords.join(' ')
+      }).join(' ')
     }
-
     case 'vocabulary_matching': {
       const pairs = config?.pairs || []
       let attempts = {}
-      try {
-        attempts = JSON.parse(value)
-      } catch {
-        return value
-      }
+      try { attempts = JSON.parse(value) } catch { return value }
       const entries = Object.entries(attempts)
-        .filter(([termIdx, defIdx]) => {
-          const t = parseInt(termIdx, 10)
-          const d = parseInt(defIdx, 10)
-          return !isNaN(t) && !isNaN(d) && t >= 0 && t < pairs.length && d >= 0 && d < pairs.length
+        .filter(([t, d]) => {
+          const ti = parseInt(t, 10); const di = parseInt(d, 10)
+          return !isNaN(ti) && !isNaN(di) && ti >= 0 && ti < pairs.length && di >= 0 && di < pairs.length
         })
-        .map(([termIdx, defIdx]) => {
-          const t = parseInt(termIdx, 10)
-          const d = parseInt(defIdx, 10)
-          const term = pairs[t]?.term || '?'
-          const definition = pairs[d]?.definition || '?'
-          const isCorrect = t === d
-          return `${term} → ${definition}${isCorrect ? ' ✅' : ' ❌'}`
+        .map(([t, d]) => {
+          const ti = parseInt(t, 10); const di = parseInt(d, 10)
+          const term = pairs[ti]?.term || '?'
+          const def = pairs[di]?.definition || '?'
+          return `${term} → ${def}${ti === di ? ' ✅' : ' ❌'}`
         })
       return entries.length > 0 ? entries.join('; ') : 'No valid matches'
     }
-
     case 'listening': {
       const questions = config?.questions || []
       let answersObj = {}
-      try {
-        answersObj = JSON.parse(value)
-      } catch {
-        return value
-      }
+      try { answersObj = JSON.parse(value) } catch { return value }
       const parts = Object.entries(answersObj)
-        .filter(([qIdx, val]) => val !== undefined && val !== null && val !== -1)
+        .filter(([, val]) => val !== undefined && val !== null && val !== -1)
         .map(([qIdx, val]) => {
           const idx = parseInt(qIdx, 10)
           const question = questions[idx] || {}
@@ -97,29 +72,26 @@ function formatResponseText(activityType, storedValue, config) {
         })
       return parts.length > 0 ? parts.join('; ') : 'No answers'
     }
-
-    case 'gap_fill':
-    case 'dictation':
-    case 'short_answer':
-    case 'reasoning':
-    default:
-      return value
+    default: return value
   }
 }
 
 export default function LessonResults() {
   const { lessonId } = useParams()
+  const [searchParams] = useSearchParams()
+  const fromContext = searchParams.get('from')
+  const classIdParam = searchParams.get('class')
+  const assignmentIdParam = searchParams.get('assignment')
+
   const { confirm } = useConfirm()
   const [lesson, setLesson] = useState(null)
   const [submissions, setSubmissions] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [exportStatus, setExportStatus] = useState(null)
-
   const [selectedIds, setSelectedIds] = useState(new Set())
   const [isDeleting, setIsDeleting] = useState(false)
   const [expandedIds, setExpandedIds] = useState(new Set())
-
   let activityMap = {}
 
   useEffect(() => {
@@ -146,6 +118,16 @@ export default function LessonResults() {
 
         const results = await getResultsForLesson(lessonId)
 
+        const studentIds = [...new Set(results.map(r => r.student_id).filter(Boolean))]
+        const profileMap = {}
+        if (studentIds.length > 0) {
+          const { data: profiles } = await supabase
+            .from('profiles')
+            .select('id, display_name, institutional_id')
+            .in('id', studentIds)
+          for (const p of profiles || []) profileMap[p.id] = p
+        }
+
         const enhanced = results.map(sub => {
           const answers = sub.answers || {}
           const activityIds = Object.keys(answers).filter(key => !key.endsWith('_graded'))
@@ -156,16 +138,10 @@ export default function LessonResults() {
             const score = graded.score ?? 0
             const maxScore = graded.maxScore ?? 0
             const autoCorrect = graded.autoCorrect !== undefined ? graded.autoCorrect : null
-
-            const actInfo = activityMap[activityId] || { 
-              prompt: `Activity ${activityId}`, 
-              position: 999, 
-              type: 'unknown', 
-              config: {} 
+            const actInfo = activityMap[activityId] || {
+              prompt: `Activity ${activityId}`, position: 999, type: 'unknown', config: {}
             }
-
             const displayResponse = formatResponseText(actInfo.type, responseText, actInfo.config)
-
             return {
               id: `resp-${activityId}`,
               activity_id: activityId,
@@ -180,17 +156,22 @@ export default function LessonResults() {
             }
           })
           responses.sort((a, b) => a.position - b.position)
-          return { ...sub, responses }
+          const profile = sub.student_id ? profileMap[sub.student_id] : null
+          return {
+            ...sub,
+            responses,
+            display_name: profile?.display_name || sub.student_identifier || '(unknown)',
+            institutional_id: profile?.institutional_id || null,
+          }
         })
 
         enhanced.sort((a, b) => {
           if (a.status === 'completed' && b.status !== 'completed') return -1
           if (a.status !== 'completed' && b.status === 'completed') return 1
-          const dateA = a.submitted_at ? new Date(a.submitted_at) : new Date(0)
-          const dateB = b.submitted_at ? new Date(b.submitted_at) : new Date(0)
-          return dateB - dateA
+          const da = a.submitted_at ? new Date(a.submitted_at) : new Date(0)
+          const db = b.submitted_at ? new Date(b.submitted_at) : new Date(0)
+          return db - da
         })
-
         setSubmissions(enhanced)
       } catch (err) {
         setError(err.message)
@@ -203,24 +184,19 @@ export default function LessonResults() {
 
   function toggleSelect(id) {
     const newSet = new Set(selectedIds)
-    if (newSet.has(id)) newSet.delete(id)
-    else newSet.add(id)
+    if (newSet.has(id)) newSet.delete(id); else newSet.add(id)
     setSelectedIds(newSet)
   }
 
   function toggleSelectAll() {
     if (!submissions) return
-    if (selectedIds.size === submissions.length) {
-      setSelectedIds(new Set())
-    } else {
-      setSelectedIds(new Set(submissions.map(s => s.id)))
-    }
+    if (selectedIds.size === submissions.length) setSelectedIds(new Set())
+    else setSelectedIds(new Set(submissions.map(s => s.id)))
   }
 
   function toggleExpand(id) {
     const newSet = new Set(expandedIds)
-    if (newSet.has(id)) newSet.delete(id)
-    else newSet.add(id)
+    if (newSet.has(id)) newSet.delete(id); else newSet.add(id)
     setExpandedIds(newSet)
   }
 
@@ -230,12 +206,9 @@ export default function LessonResults() {
     const ok = await confirm({
       title: 'Delete Submissions',
       message: `Delete ${ids.length} submission${ids.length > 1 ? 's' : ''}? This cannot be undone.`,
-      confirmText: 'Delete',
-      cancelText: 'Cancel',
-      type: 'danger'
+      confirmText: 'Delete', cancelText: 'Cancel', type: 'danger'
     })
     if (!ok) return
-
     setIsDeleting(true)
     try {
       await deleteSubmissions(ids)
@@ -251,30 +224,24 @@ export default function LessonResults() {
 
   function downloadCSV() {
     if (!submissions.length) return
-    const rows = [['Student', 'Status', 'Submitted', 'Score %', 'Max score', 'Q#', 'Question', 'Response', 'Result']]
+    const rows = [['Student', 'Institutional ID', 'Status', 'Submitted', 'Score %', 'Max score', 'Q#', 'Question', 'Response', 'Result']]
     for (const s of submissions) {
       if (s.responses.length === 0) {
-        rows.push([s.student_identifier, s.status, s.submitted_at || '', s.score ?? '', s.max_auto_score ?? '', '', '', '', ''])
+        rows.push([s.display_name, s.institutional_id || '', s.status, s.submitted_at || '', s.score ?? '', s.max_auto_score ?? '', '', '', '', ''])
         continue
       }
       for (const r of s.responses) {
         let resultLabel = 'teacher review'
         const autoTypes = ['gap_fill', 'multiple_choice', 'gap_fill_dropdown', 'sentence_jumble', 'vocabulary_matching', 'listening', 'dictation']
         if (autoTypes.includes(r.type)) {
-          if (r.maxScore > 0 && r.score === r.maxScore) {
-            resultLabel = 'correct'
-          } else if (r.maxScore > 0 && r.score < r.maxScore) {
-            resultLabel = 'incorrect'
-          } else if (r.auto_correct === true) {
-            resultLabel = 'correct'
-          } else if (r.auto_correct === false) {
-            resultLabel = 'incorrect'
-          } else {
-            resultLabel = 'incorrect'
-          }
+          if (r.maxScore > 0 && r.score === r.maxScore) resultLabel = 'correct'
+          else if (r.maxScore > 0 && r.score < r.maxScore) resultLabel = 'incorrect'
+          else if (r.auto_correct === true) resultLabel = 'correct'
+          else resultLabel = 'incorrect'
         }
         rows.push([
-          s.student_identifier,
+          s.display_name,
+          s.institutional_id || '',
           s.status,
           s.submitted_at || '',
           s.score ?? '',
@@ -287,8 +254,7 @@ export default function LessonResults() {
       }
     }
     const csvContent = rows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\n')
-    const bom = '\uFEFF'
-    const blob = new Blob([bom + csvContent], { type: 'text/csv;charset=utf-8' })
+    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -303,9 +269,7 @@ export default function LessonResults() {
   async function exportToSheets() {
     setExportStatus('exporting')
     try {
-      const { data, error } = await supabase.functions.invoke('export-to-sheets', {
-        body: { lessonId }
-      })
+      const { data, error } = await supabase.functions.invoke('export-to-sheets', { body: { lessonId } })
       if (error) throw error
       setExportStatus(data?.spreadsheetUrl ? `done:${data.spreadsheetUrl}` : 'done')
       toast.success('Exported to Google Sheets!')
@@ -314,6 +278,9 @@ export default function LessonResults() {
       toast.error('Export failed: ' + e.message)
     }
   }
+
+  // Context-aware back link.
+  const isFromAssignment = fromContext === 'assignment' && classIdParam && assignmentIdParam
 
   if (loading) return <p className="text-muted mx-4">Loading…</p>
   if (error) return <div className="card p-4 border-crest bg-crestSoft text-crest text-sm mx-4">{error}</div>
@@ -324,11 +291,17 @@ export default function LessonResults() {
 
   return (
     <div className="space-y-3 pb-24 px-4">
-      <Link to="/" className="btn-ghost text-sm pl-1">
-        ← My lessons
-      </Link>
+      {isFromAssignment ? (
+        <Link
+          to={`/classes/${classIdParam}/assignments/${assignmentIdParam}`}
+          className="inline-flex items-center gap-2 px-3 py-1.5 bg-white border border-warm-300 text-warm-800 text-sm font-medium rounded-md hover:bg-warm-100 shadow-sm"
+        >
+          ← Back to assignment
+        </Link>
+      ) : (
+        <Link to="/" className="btn-ghost text-sm pl-1">← My lessons</Link>
+      )}
 
-      {/* ---- Header with logo ---- */}
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-3">
           <img src="/sel.png" alt="SEL Logo" className="h-10 w-auto" />
@@ -362,9 +335,7 @@ export default function LessonResults() {
         </div>
       )}
       {exportStatus?.startsWith('error') && (
-        <div className="card p-2 bg-crestSoft text-crest text-xs">
-          {exportStatus.split('error:')[1]}
-        </div>
+        <div className="card p-2 bg-crestSoft text-crest text-xs">{exportStatus.split('error:')[1]}</div>
       )}
 
       {submissions.length === 0 && <p className="text-muted text-sm">No student activity yet.</p>}
@@ -378,9 +349,7 @@ export default function LessonResults() {
               onChange={toggleSelectAll}
               className="w-3.5 h-3.5 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
             />
-            <span className="text-xs text-gray-600">
-              {selectedIds.size} / {submissions.length}
-            </span>
+            <span className="text-xs text-gray-600">{selectedIds.size} / {submissions.length}</span>
           </div>
           <button
             onClick={handleBulkDelete}
@@ -408,7 +377,14 @@ export default function LessonResults() {
                   className="w-3.5 h-3.5 text-blue-600 rounded border-gray-300 focus:ring-blue-500 flex-shrink-0"
                 />
                 <div className="flex-1 grid grid-cols-2 sm:grid-cols-4 gap-1 text-xs">
-                  <span className="font-medium truncate">{s.student_identifier}</span>
+                  <span className="font-medium truncate">
+                    {s.display_name}
+                    {s.institutional_id && (
+                      <span className="text-gray-400 font-normal ml-1">
+                        ({s.institutional_id})
+                      </span>
+                    )}
+                  </span>
                   <span className="capitalize">{s.status === 'completed' ? '✅' : '⏳'} {s.status}</span>
                   <span>{s.status === 'completed' && s.max_auto_score > 0 ? `${s.score}%` : '-'}</span>
                   <span className="text-gray-400 truncate hidden sm:block">
@@ -429,26 +405,12 @@ export default function LessonResults() {
                       let resultLabel = 'teacher review'
                       let resultClass = 'text-amber-600'
                       const autoTypes = ['gap_fill', 'multiple_choice', 'gap_fill_dropdown', 'sentence_jumble', 'vocabulary_matching', 'listening', 'dictation']
-                      
                       if (autoTypes.includes(r.type)) {
-                        if (r.maxScore > 0 && r.score === r.maxScore) {
-                          resultLabel = 'correct'
-                          resultClass = 'text-green-600'
-                        } else if (r.maxScore > 0 && r.score < r.maxScore) {
-                          resultLabel = 'incorrect'
-                          resultClass = 'text-red-600'
-                        } else if (r.auto_correct === true) {
-                          resultLabel = 'correct'
-                          resultClass = 'text-green-600'
-                        } else if (r.auto_correct === false) {
-                          resultLabel = 'incorrect'
-                          resultClass = 'text-red-600'
-                        } else {
-                          resultLabel = 'incorrect'
-                          resultClass = 'text-red-600'
-                        }
+                        if (r.maxScore > 0 && r.score === r.maxScore) { resultLabel = 'correct'; resultClass = 'text-green-600' }
+                        else if (r.maxScore > 0 && r.score < r.maxScore) { resultLabel = 'incorrect'; resultClass = 'text-red-600' }
+                        else if (r.auto_correct === true) { resultLabel = 'correct'; resultClass = 'text-green-600' }
+                        else { resultLabel = 'incorrect'; resultClass = 'text-red-600' }
                       }
-                      
                       const questionNum = index + 1
                       return (
                         <div key={r.id} className="text-[11px] bg-white rounded px-1.5 py-0.5 border border-gray-100 flex items-center gap-2 flex-wrap">
