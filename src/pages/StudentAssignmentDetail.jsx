@@ -6,8 +6,145 @@ import {
   getAssignmentById,
   listAssignmentItems,
   formatJst,
+  getAttachmentSignedUrl,
+  formatFileSize,
+  isAudioAttachment,
 } from '../lib/assignmentsApi';
 import { getMyItemStatusMap } from '../lib/studentSubmissionApi';
+
+function FileAttachment({ item }) {
+  const [downloading, setDownloading] = useState(false);
+  const [audioUrl, setAudioUrl] = useState(null);
+  const [audioError, setAudioError] = useState(null);
+
+  const hasFile = Boolean(item.file_path);
+  const isAudio = hasFile && isAudioAttachment(item.file_name || '');
+
+  useEffect(() => {
+    if (!isAudio) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const url = await getAttachmentSignedUrl(item.file_path, {
+          download: false,
+        });
+        if (!cancelled) setAudioUrl(url);
+      } catch (err) {
+        if (!cancelled) {
+          setAudioError(err.message || 'Could not load audio.');
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAudio, item.file_path]);
+
+  const handleDownload = async () => {
+    if (!hasFile) return;
+    setDownloading(true);
+    try {
+      const url = await getAttachmentSignedUrl(item.file_path, {
+        fileName: item.file_name,
+      });
+      const a = document.createElement('a');
+      a.href = url;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (err) {
+      console.error(err);
+      toast.error(
+        err.message ||
+          'Could not create a download link. Please refresh the page and try again.'
+      );
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  if (!hasFile) {
+    return (
+      <p className="text-xs text-gray-500 mt-2">
+        File not available.
+      </p>
+    );
+  }
+
+  return (
+    <div className="mt-3 space-y-3">
+      <div className="flex items-center gap-3 text-xs flex-wrap">
+        <span className="font-medium text-gray-700 truncate max-w-xs">
+          {item.file_name}
+        </span>
+        {item.file_size != null && (
+          <span className="text-gray-400">
+            {formatFileSize(item.file_size)}
+          </span>
+        )}
+      </div>
+
+      {isAudio && (
+        <div>
+          {audioUrl ? (
+            <audio controls src={audioUrl} className="w-full max-w-md">
+              Your browser does not support the audio element.
+            </audio>
+          ) : audioError ? (
+            <p className="text-xs text-red-600">{audioError}</p>
+          ) : (
+            <p className="text-xs text-gray-500">Loading audio…</p>
+          )}
+        </div>
+      )}
+
+      <div>
+        <button
+          type="button"
+          onClick={handleDownload}
+          disabled={downloading}
+          className="py-1.5 px-3 text-sm bg-gray-100 hover:bg-gray-200 text-gray-900 border border-gray-300 rounded-md disabled:opacity-50"
+        >
+          {downloading ? 'Preparing…' : 'Download'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function LinkAttachment({ item }) {
+  const url = item.url || '';
+  const description = item.body || '';
+
+  if (!url) {
+    return (
+      <p className="text-xs text-gray-500 mt-2">
+        Link not available.
+      </p>
+    );
+  }
+
+  return (
+    <div className="mt-3 space-y-2">
+      <p className="text-xs text-gray-500 break-all">{url}</p>
+      {description && (
+        <p className="text-sm text-gray-700 whitespace-pre-wrap">
+          {description}
+        </p>
+      )}
+      <div>
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-block py-1.5 px-3 text-sm bg-gray-100 hover:bg-gray-200 text-gray-900 border border-gray-300 rounded-md"
+        >
+          Open link ↗
+        </a>
+      </div>
+    </div>
+  );
+}
 
 export default function StudentAssignmentDetail() {
   const { assignmentId } = useParams();
@@ -47,8 +184,6 @@ export default function StudentAssignmentDetail() {
     };
   }, [load]);
 
-  // Refresh when the student returns to this tab (e.g. after
-  // completing a lesson in a new tab).
   useEffect(() => {
     const onFocus = () => {
       load();
@@ -99,8 +234,10 @@ export default function StudentAssignmentDetail() {
     window.open(url, '_blank', 'noopener,noreferrer');
   };
 
+  // Only lessons show a status badge. Text notes, files, and links do
+  // not have completion status.
   const renderItemBadge = (item) => {
-    if (item.type === 'text') return null;
+    if (item.type !== 'lesson') return null;
     const st = statusMap[item.id];
     if (!st) {
       return (
@@ -223,6 +360,9 @@ export default function StudentAssignmentDetail() {
             <ul className="space-y-3">
               {items.map((item, idx) => {
                 const isLesson = item.type === 'lesson';
+                const isText = item.type === 'text';
+                const isFile = item.type === 'file';
+                const isLink = item.type === 'link';
                 return (
                   <li
                     key={item.id}
@@ -240,7 +380,7 @@ export default function StudentAssignmentDetail() {
                           {renderItemBadge(item)}
                         </div>
 
-                        {item.type === 'text' && item.body && (
+                        {isText && item.body && (
                           <div
                             className="prose prose-sm max-w-none text-gray-700 mt-2"
                             dangerouslySetInnerHTML={{ __html: item.body }}
@@ -252,6 +392,9 @@ export default function StudentAssignmentDetail() {
                             Lesson · {item.lesson.level || 'B1'}
                           </p>
                         )}
+
+                        {isFile && <FileAttachment item={item} />}
+                        {isLink && <LinkAttachment item={item} />}
                       </div>
 
                       {isLesson && renderItemButton(item)}

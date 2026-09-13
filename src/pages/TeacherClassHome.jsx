@@ -23,6 +23,7 @@ import {
   listClassRoster,
   removeStudentFromClass,
   resetStudentPassword,
+  enrollStudentByInstitutionalId,
 } from '../lib/lmsApi';
 import {
   listAssignmentsForClass,
@@ -33,9 +34,11 @@ import {
 import PasswordRevealModal from '../components/PasswordRevealModal';
 
 const TABS = [
-  { key: 'assignments', label: 'Assignments' },
-  { key: 'lessons', label: 'Lessons' },
-  { key: 'people', label: 'People' },
+  { key: 'assignments', label: 'Assignments', type: 'tab' },
+  { key: 'lessons', label: 'Lessons', type: 'tab' },
+  { key: 'people', label: 'People', type: 'tab' },
+  { key: 'gradebook', label: 'Grade book', type: 'link', href: (id) => `/classes/${id}/gradebook` },
+  { key: 'grade-setup', label: 'Grade setup', type: 'link', href: (id) => `/classes/${id}/grade-setup` },
 ];
 
 const headerBtnStyle = {
@@ -122,6 +125,9 @@ export default function TeacherClassHome() {
     password: '',
   });
 
+  const [addId, setAddId] = useState('');
+  const [addBusy, setAddBusy] = useState(false);
+
   const sensors = useSensors(
     useSensor(PointerSensor),
     useSensor(KeyboardSensor, {
@@ -180,6 +186,35 @@ export default function TeacherClassHome() {
     } catch (err) {
       console.error(err);
       toast.error(err.message || 'Could not reset password.');
+    }
+  };
+
+  const handleAddExistingStudent = async (e) => {
+    if (e && typeof e.preventDefault === 'function') e.preventDefault();
+    const value = addId.trim();
+    if (!value) {
+      toast.error('Please enter a student ID.');
+      return;
+    }
+    setAddBusy(true);
+    try {
+      const result = await enrollStudentByInstitutionalId(id, value);
+      if (!result || result.ok !== true) {
+        toast.error(result?.error || 'Could not add student.');
+        return;
+      }
+      if (result.already_enrolled) {
+        toast.success(`${result.student.display_name} is already in this class.`);
+      } else {
+        toast.success(`Added ${result.student.display_name}.`);
+        setAddId('');
+      }
+      await load();
+    } catch (err) {
+      console.error(err);
+      toast.error(err.message || 'Could not add student.');
+    } finally {
+      setAddBusy(false);
     }
   };
 
@@ -242,25 +277,44 @@ export default function TeacherClassHome() {
         </div>
 
         <div className="border-b border-gray-200 mb-6">
-          <nav className="flex gap-6">
-            {TABS.map((t) => (
-              <button
-                key={t.key}
-                type="button"
-                onClick={() => setTab(t.key)}
-                className={
-                  'pb-3 px-1 text-sm font-medium border-b-2 transition ' +
-                  (tab === t.key
-                    ? 'border-indigo-600 text-indigo-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700')
-                }
-              >
-                {t.label}
-                {t.key === 'assignments' ? ` (${assignments.length})` : ''}
-                {t.key === 'lessons' ? ` (${lessonCopies.length})` : ''}
-                {t.key === 'people' ? ` (${roster.length})` : ''}
-              </button>
-            ))}
+          <nav className="flex gap-6 flex-wrap">
+            {TABS.map((t) => {
+              const label =
+                t.label +
+                (t.key === 'assignments'
+                  ? ` (${assignments.length})`
+                  : t.key === 'lessons'
+                  ? ` (${lessonCopies.length})`
+                  : t.key === 'people'
+                  ? ` (${roster.length})`
+                  : '');
+              if (t.type === 'link') {
+                return (
+                  <Link
+                    key={t.key}
+                    to={t.href(id)}
+                    className="pb-3 px-1 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700 transition"
+                  >
+                    {label}
+                  </Link>
+                );
+              }
+              return (
+                <button
+                  key={t.key}
+                  type="button"
+                  onClick={() => setTab(t.key)}
+                  className={
+                    'pb-3 px-1 text-sm font-medium border-b-2 transition ' +
+                    (tab === t.key
+                      ? 'border-indigo-600 text-indigo-600'
+                      : 'border-transparent text-gray-500 hover:text-gray-700')
+                  }
+                >
+                  {label}
+                </button>
+              );
+            })}
           </nav>
         </div>
 
@@ -335,46 +389,83 @@ export default function TeacherClassHome() {
         )}
 
         {tab === 'people' && (
-          <section className="bg-white rounded-lg shadow">
-            {roster.length === 0 ? (
-              <p className="p-8 text-center text-gray-500">
-                No students yet. Import a CSV to add them.
+          <section className="space-y-4">
+            <form
+              onSubmit={handleAddExistingStudent}
+              className="bg-white rounded-lg shadow p-4"
+            >
+              <label
+                htmlFor="add-student-id"
+                className="block text-sm font-medium text-gray-700 mb-1"
+              >
+                Add an existing student by ID
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  id="add-student-id"
+                  type="text"
+                  value={addId}
+                  onChange={(e) => setAddId(e.target.value)}
+                  placeholder="e.g. TEST001"
+                  autoComplete="off"
+                  className="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                  disabled={addBusy}
+                />
+                <button
+                  type="submit"
+                  disabled={addBusy || !addId.trim()}
+                  className="py-2 px-4 text-sm bg-gray-100 hover:bg-gray-200 text-gray-900 border border-gray-300 rounded-md disabled:opacity-50"
+                >
+                  {addBusy ? 'Adding…' : 'Add'}
+                </button>
+              </div>
+              <p className="text-xs text-gray-500 mt-2">
+                The student must already have an account. To create new
+                accounts, use <span className="font-medium">Import students</span>.
               </p>
-            ) : (
-              <ul className="divide-y divide-gray-100">
-                {roster.map((row) => {
-                  const s = row.student;
-                  if (!s) return null;
-                  return (
-                    <li key={row.id} className="p-4 flex items-center justify-between">
-                      <div>
-                        <div className="font-medium text-gray-900">{s.display_name}</div>
-                        <div className="text-xs text-gray-500">
-                          ID: {s.institutional_id}
-                          {s.must_change_password ? ' · must change password' : ''}
+            </form>
+
+            <div className="bg-white rounded-lg shadow">
+              {roster.length === 0 ? (
+                <p className="p-8 text-center text-gray-500">
+                  No students yet. Import a CSV or add one by ID above.
+                </p>
+              ) : (
+                <ul className="divide-y divide-gray-100">
+                  {roster.map((row) => {
+                    const s = row.student;
+                    if (!s) return null;
+                    return (
+                      <li key={row.id} className="p-4 flex items-center justify-between">
+                        <div>
+                          <div className="font-medium text-gray-900">{s.display_name}</div>
+                          <div className="text-xs text-gray-500">
+                            ID: {s.institutional_id}
+                            {s.must_change_password ? ' · must change password' : ''}
+                          </div>
                         </div>
-                      </div>
-                      <div className="flex items-center gap-3">
-                        <button
-                          type="button"
-                          onClick={() => handleReset(s.id, s.display_name)}
-                          className="text-xs text-indigo-600 hover:text-indigo-700"
-                        >
-                          Reset password
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleRemove(s.id, s.display_name)}
-                          className="text-xs text-red-600 hover:text-red-700"
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
+                        <div className="flex items-center gap-3">
+                          <button
+                            type="button"
+                            onClick={() => handleReset(s.id, s.display_name)}
+                            className="text-xs text-indigo-600 hover:text-indigo-700"
+                          >
+                            Reset password
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleRemove(s.id, s.display_name)}
+                            className="text-xs text-red-600 hover:text-red-700"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
           </section>
         )}
       </div>

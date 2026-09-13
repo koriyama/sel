@@ -6,6 +6,7 @@ import { useAuth } from '../context/AuthContext';
 import { listMyClassesAsStudent } from '../lib/lmsApi';
 import { listAssignmentsForStudent, formatJst } from '../lib/assignmentsApi';
 import { getMyAssignmentProgress } from '../lib/studentSubmissionApi';
+import { getStudentRollingGradeForClass } from '../lib/gradebookApi';
 import { listStudentCalendarAssignments } from '../lib/calendarApi';
 import DueSoonStrip from '../components/DueSoonStrip';
 
@@ -15,6 +16,7 @@ const StudentDashboard = () => {
   const [assignments, setAssignments] = useState([]);
   const [progress, setProgress] = useState({});
   const [calendarAssignments, setCalendarAssignments] = useState([]);
+  const [rollingGrades, setRollingGrades] = useState({});
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
@@ -31,9 +33,30 @@ const StudentDashboard = () => {
         setClasses(c);
         setAssignments(a);
         setCalendarAssignments(cal);
+
         const ids = a.map((x) => x.id);
         const prog = await getMyAssignmentProgress(ids);
         if (!cancelled) setProgress(prog);
+
+        // Rolling grade per class, in parallel.
+        const gradeEntries = await Promise.all(
+          c.map(async (cls) => {
+            try {
+              const g = await getStudentRollingGradeForClass(cls.id);
+              return [cls.id, g];
+            } catch (err) {
+              console.error('Rolling grade failed for class', cls.id, err);
+              return [cls.id, null];
+            }
+          })
+        );
+        if (!cancelled) {
+          const map = {};
+          for (const [cid, g] of gradeEntries) {
+            if (g && g.rolling_grade != null) map[cid] = g;
+          }
+          setRollingGrades(map);
+        }
       } catch (err) {
         console.error(err);
         if (!cancelled) toast.error('Could not load your dashboard.');
@@ -125,6 +148,59 @@ const StudentDashboard = () => {
 
         <section>
           <h2 className="text-lg font-semibold text-gray-900 mb-3">
+            My classes
+          </h2>
+          {loading ? (
+            <p className="text-gray-500">Loading…</p>
+          ) : classes.length === 0 ? (
+            <div className="bg-white p-6 rounded-lg shadow text-gray-600">
+              You are not yet enrolled in any class. Please ask your teacher.
+            </div>
+          ) : (
+            <ul className="space-y-3">
+              {classes.map((c) => {
+                const g = rollingGrades[c.id];
+                return (
+                  <li key={c.id} className="bg-white p-4 rounded-lg shadow">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="inline-block w-3 h-3 rounded-full flex-shrink-0"
+                        style={{ backgroundColor: c.color || '#94a3b8' }}
+                      />
+                      <h3 className="text-base font-semibold text-gray-900">
+                        {c.name}
+                      </h3>
+                    </div>
+                    {c.description && (
+                      <p className="text-sm text-gray-600 mt-1">
+                        {c.description}
+                      </p>
+                    )}
+                    {g && g.rolling_grade != null && (
+                      <p className="text-sm text-gray-700 mt-2">
+                        <span className="text-gray-500">Current grade:</span>{' '}
+                        <span className="font-semibold">
+                          {g.rolling_grade}%
+                        </span>
+                        <span className="text-xs text-gray-400 ml-2">
+                          ({g.total_earned_points} / {g.total_possible_points} pts)
+                        </span>
+                      </p>
+                    )}
+                    <p className="text-xs text-gray-400 mt-2">
+                      {c.start_date ? `Starts ${c.start_date}` : ''}
+                      {c.start_date && c.end_date ? ' · ' : ''}
+                      {c.end_date ? `Ends ${c.end_date}` : ''}
+                    </p>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+
+        <section>
+          <h2 className="text-lg font-semibold text-gray-900 mb-3">
             Assignments
           </h2>
           {loading ? (
@@ -166,45 +242,6 @@ const StudentDashboard = () => {
                   </li>
                 );
               })}
-            </ul>
-          )}
-        </section>
-
-        <section>
-          <h2 className="text-lg font-semibold text-gray-900 mb-3">
-            My classes
-          </h2>
-          {loading ? (
-            <p className="text-gray-500">Loading…</p>
-          ) : classes.length === 0 ? (
-            <div className="bg-white p-6 rounded-lg shadow text-gray-600">
-              You are not yet enrolled in any class. Please ask your teacher.
-            </div>
-          ) : (
-            <ul className="space-y-3">
-              {classes.map((c) => (
-                <li key={c.id} className="bg-white p-4 rounded-lg shadow">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className="inline-block w-3 h-3 rounded-full flex-shrink-0"
-                      style={{ backgroundColor: c.color || '#94a3b8' }}
-                    />
-                    <h3 className="text-base font-semibold text-gray-900">
-                      {c.name}
-                    </h3>
-                  </div>
-                  {c.description && (
-                    <p className="text-sm text-gray-600 mt-1">
-                      {c.description}
-                    </p>
-                  )}
-                  <p className="text-xs text-gray-400 mt-2">
-                    {c.start_date ? `Starts ${c.start_date}` : ''}
-                    {c.start_date && c.end_date ? ' · ' : ''}
-                    {c.end_date ? `Ends ${c.end_date}` : ''}
-                  </p>
-                </li>
-              ))}
             </ul>
           )}
         </section>

@@ -128,6 +128,26 @@ export async function removeStudentFromClass(classId, studentId) {
   if (error) throw error;
 }
 
+// Add an existing student to a class by institutional ID. Delegates to
+// a SECURITY DEFINER SQL function, which handles permission checks,
+// case-insensitive lookup, and the "already enrolled" case.
+//
+// Returns the JSON payload from the function:
+//   { ok: true,  already_enrolled: false, student: {...} }  — newly added
+//   { ok: true,  already_enrolled: true,  student: {...} }  — was already in the class
+//   { ok: false, error: "..." }                             — problem
+export async function enrollStudentByInstitutionalId(classId, institutionalId) {
+  const { data, error } = await supabase.rpc(
+    'enroll_student_by_institutional_id',
+    {
+      p_class_id: classId,
+      p_institutional_id: institutionalId,
+    }
+  );
+  if (error) throw error;
+  return data;
+}
+
 // ---------- Edge Function calls ----------
 async function callAdminStudentManager(payload) {
   const { data: { session } } = await supabase.auth.getSession();

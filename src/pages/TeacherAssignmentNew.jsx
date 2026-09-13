@@ -1,5 +1,5 @@
 // src/pages/TeacherAssignmentNew.jsx
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import {
@@ -26,7 +26,13 @@ import {
   createBareAssignment,
   addLessonItem,
   addTextItem,
+  addFileItem,
+  addLinkItem,
+  attachFileToItem,
   jstLocalInputToIso,
+  formatFileSize,
+  isAllowedAttachment,
+  attachmentMaxBytes,
 } from '../lib/assignmentsApi';
 
 let tempIdCounter = 0;
@@ -39,6 +45,22 @@ function combineDateTime(dateStr, timeStr, fallbackTime) {
   if (!dateStr) return '';
   const t = timeStr || fallbackTime || '00:00';
   return `${dateStr}T${t}`;
+}
+
+function typeLabel(t) {
+  if (t === 'lesson') return 'Lesson';
+  if (t === 'text') return 'Note';
+  if (t === 'file') return 'File';
+  if (t === 'link') return 'Link';
+  return t;
+}
+
+function typeClass(t) {
+  if (t === 'lesson') return 'bg-indigo-100 text-indigo-800';
+  if (t === 'text') return 'bg-amber-100 text-amber-800';
+  if (t === 'file') return 'bg-slate-100 text-slate-800';
+  if (t === 'link') return 'bg-teal-100 text-teal-800';
+  return 'bg-slate-100 text-slate-800';
 }
 
 function SortableItem({ item, onUpdate, onRemove }) {
@@ -56,6 +78,32 @@ function SortableItem({ item, onUpdate, onRemove }) {
     transition,
     opacity: isDragging ? 0.5 : 1,
   };
+
+  const fileInputRef = useRef(null);
+
+  const handleFilePick = (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    if (!isAllowedAttachment(f)) {
+      toast.error('That file type is not allowed.');
+      return;
+    }
+    if (f.size > attachmentMaxBytes()) {
+      toast.error(`File is too large. Maximum is ${formatFileSize(attachmentMaxBytes())}.`);
+      return;
+    }
+    const oldName = item.pendingFile?.name || '';
+    const shouldUpdateTitle =
+      !item.title || item.title === 'File' || item.title === oldName;
+    onUpdate({
+      pendingFile: f,
+      ...(shouldUpdateTitle ? { title: f.name } : {}),
+    });
+  };
+
+  const linkUrlInvalid =
+    item.type === 'link' && item.url && !/^https?:\/\//i.test(item.url);
 
   return (
     <div
@@ -75,13 +123,10 @@ function SortableItem({ item, onUpdate, onRemove }) {
         </button>
         <span
           className={
-            'text-xs font-medium px-2 py-0.5 rounded-full ' +
-            (item.type === 'lesson'
-              ? 'bg-indigo-100 text-indigo-800'
-              : 'bg-amber-100 text-amber-800')
+            'text-xs font-medium px-2 py-0.5 rounded-full ' + typeClass(item.type)
           }
         >
-          {item.type === 'lesson' ? 'Lesson' : 'Note'}
+          {typeLabel(item.type)}
         </span>
         <input
           type="text"
@@ -111,6 +156,81 @@ function SortableItem({ item, onUpdate, onRemove }) {
             value={item.body || ''}
             onChange={(e) => onUpdate({ body: e.target.value })}
             placeholder="Type your note here..."
+          />
+        </div>
+      )}
+
+      {item.type === 'file' && (
+        <div className="pl-8 space-y-2">
+          {item.pendingFile ? (
+            <div className="flex items-center gap-3 text-xs text-gray-600 flex-wrap">
+              <span className="font-medium truncate max-w-xs">
+                {item.pendingFile.name}
+              </span>
+              <span className="text-gray-400">
+                {formatFileSize(item.pendingFile.size)}
+              </span>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                className="text-gray-700 hover:text-gray-900 underline"
+              >
+                Replace file
+              </button>
+              <button
+                type="button"
+                onClick={() => onUpdate({ pendingFile: null })}
+                className="text-red-600 hover:text-red-700"
+              >
+                Remove file
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-3 text-xs">
+              <button
+                type="button"
+                onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                className="text-gray-700 hover:text-gray-900 underline"
+              >
+                Choose file
+              </button>
+              <span className="text-gray-400">
+                Max {formatFileSize(attachmentMaxBytes())}.
+              </span>
+            </div>
+          )}
+          <input
+            ref={fileInputRef}
+            type="file"
+            className="hidden"
+            onChange={handleFilePick}
+          />
+          <p className="text-xs text-gray-400">
+            The file uploads when you click Create assignment.
+          </p>
+        </div>
+      )}
+
+      {item.type === 'link' && (
+        <div className="pl-8 space-y-2">
+          <input
+            type="url"
+            value={item.url || ''}
+            onChange={(e) => onUpdate({ url: e.target.value })}
+            placeholder="https://example.com"
+            className="block w-full px-3 py-1.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+          />
+          {linkUrlInvalid && (
+            <p className="text-xs text-red-600">
+              URL must start with http:// or https://
+            </p>
+          )}
+          <textarea
+            rows={2}
+            value={item.body || ''}
+            onChange={(e) => onUpdate({ body: e.target.value })}
+            placeholder="Optional description"
+            className="block w-full px-3 py-1.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
           />
         </div>
       )}
@@ -163,6 +283,8 @@ export default function TeacherAssignmentNew() {
     })();
   }, [classId]);
 
+  // New items are inserted at the top of the list so they appear
+  // directly under the Add buttons.
   const handleAddLesson = () => {
     const lesson = lessons.find((l) => l.id === pickerLessonId);
     if (!lesson) {
@@ -170,7 +292,6 @@ export default function TeacherAssignmentNew() {
       return;
     }
     setItems((prev) => [
-      ...prev,
       {
         tempId: makeTempId(),
         type: 'lesson',
@@ -179,6 +300,7 @@ export default function TeacherAssignmentNew() {
         sourceLessonTitle: lesson.title,
         body: '',
       },
+      ...prev,
     ]);
     setPickerLessonId('');
     setShowLessonPicker(false);
@@ -186,7 +308,6 @@ export default function TeacherAssignmentNew() {
 
   const handleAddText = () => {
     setItems((prev) => [
-      ...prev,
       {
         tempId: makeTempId(),
         type: 'text',
@@ -195,6 +316,56 @@ export default function TeacherAssignmentNew() {
         sourceLessonId: null,
         sourceLessonTitle: null,
       },
+      ...prev,
+    ]);
+  };
+
+  // Opens the OS file picker immediately. The item is only created if
+  // a valid file is chosen. Cancelling changes nothing.
+  const handleAddFile = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.onchange = (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      if (!isAllowedAttachment(f)) {
+        toast.error('That file type is not allowed.');
+        return;
+      }
+      if (f.size > attachmentMaxBytes()) {
+        toast.error(
+          `File is too large. Maximum is ${formatFileSize(attachmentMaxBytes())}.`
+        );
+        return;
+      }
+      setItems((prev) => [
+        {
+          tempId: makeTempId(),
+          type: 'file',
+          title: f.name,
+          body: '',
+          pendingFile: f,
+          sourceLessonId: null,
+          sourceLessonTitle: null,
+        },
+        ...prev,
+      ]);
+    };
+    input.click();
+  };
+
+  const handleAddLink = () => {
+    setItems((prev) => [
+      {
+        tempId: makeTempId(),
+        type: 'link',
+        title: 'Link',
+        body: '',
+        url: '',
+        sourceLessonId: null,
+        sourceLessonTitle: null,
+      },
+      ...prev,
     ]);
   };
 
@@ -224,6 +395,25 @@ export default function TeacherAssignmentNew() {
       toast.error('Please enter a title.');
       return;
     }
+
+    for (const item of items) {
+      if (item.type === 'link') {
+        const u = (item.url || '').trim();
+        if (!u) {
+          toast.error('A link item is missing its URL. Fill it in or remove the item.');
+          return;
+        }
+        if (!/^https?:\/\//i.test(u)) {
+          toast.error('Every link URL must start with http:// or https://');
+          return;
+        }
+      }
+      if (item.type === 'file' && !item.pendingFile) {
+        toast.error('A file item has no file attached. Attach a file or remove the item.');
+        return;
+      }
+    }
+
     setSaving(true);
     try {
       const startLocal = combineDateTime(form.startDate, form.startTime, '00:00');
@@ -237,24 +427,56 @@ export default function TeacherAssignmentNew() {
         dueAt: dueLocal ? jstLocalInputToIso(dueLocal) : null,
       });
 
+      const itemErrors = [];
+
       for (const item of items) {
-        if (item.type === 'lesson') {
-          await addLessonItem({
-            assignmentId: assignment.id,
-            classId,
-            originalLessonId: item.sourceLessonId,
-            title: item.title,
-          });
-        } else {
-          await addTextItem({
-            assignmentId: assignment.id,
-            title: item.title,
-            body: item.body || '',
-          });
+        try {
+          if (item.type === 'lesson') {
+            await addLessonItem({
+              assignmentId: assignment.id,
+              classId,
+              originalLessonId: item.sourceLessonId,
+              title: item.title,
+            });
+          } else if (item.type === 'text') {
+            await addTextItem({
+              assignmentId: assignment.id,
+              title: item.title,
+              body: item.body || '',
+            });
+          } else if (item.type === 'file') {
+            const created = await addFileItem({
+              assignmentId: assignment.id,
+              title: item.title,
+            });
+            if (item.pendingFile) {
+              await attachFileToItem({
+                itemId: created.id,
+                assignmentId: assignment.id,
+                file: item.pendingFile,
+              });
+            }
+          } else if (item.type === 'link') {
+            await addLinkItem({
+              assignmentId: assignment.id,
+              title: item.title,
+              url: item.url.trim(),
+              description: item.body || '',
+            });
+          }
+        } catch (err) {
+          console.error(err);
+          itemErrors.push(`${item.title || item.type}: ${err.message}`);
         }
       }
 
-      toast.success('Assignment created as draft.');
+      if (itemErrors.length > 0) {
+        toast.error(
+          `Assignment created, but some items failed:\n${itemErrors.join('\n')}`
+        );
+      } else {
+        toast.success('Assignment created as draft.');
+      }
       navigate(`/classes/${classId}/assignments/${assignment.id}`);
     } catch (err) {
       console.error(err);
@@ -286,7 +508,8 @@ export default function TeacherAssignmentNew() {
             New assignment {cls ? `for ${cls.name}` : ''}
           </h1>
           <p className="text-sm text-gray-600 mt-1">
-            An assignment can hold several lessons and text notes, in any order.
+            An assignment can hold lessons, text notes, files, and links, in any
+            order.
           </p>
         </div>
 
@@ -377,11 +600,11 @@ export default function TeacherAssignmentNew() {
           </section>
 
           <section className="bg-white rounded-lg shadow p-6">
-            <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
               <h2 className="text-lg font-semibold text-gray-900">
                 Items ({items.length})
               </h2>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <button
                   type="button"
                   onClick={() => setShowLessonPicker(true)}
@@ -396,6 +619,20 @@ export default function TeacherAssignmentNew() {
                   className="py-1.5 px-3 text-sm bg-gray-100 hover:bg-gray-200 text-gray-900 border border-gray-300 rounded-md"
                 >
                   + Add note
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAddFile}
+                  className="py-1.5 px-3 text-sm bg-gray-100 hover:bg-gray-200 text-gray-900 border border-gray-300 rounded-md"
+                >
+                  + Add file
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAddLink}
+                  className="py-1.5 px-3 text-sm bg-gray-100 hover:bg-gray-200 text-gray-900 border border-gray-300 rounded-md"
+                >
+                  + Add link
                 </button>
               </div>
             </div>
@@ -441,7 +678,7 @@ export default function TeacherAssignmentNew() {
 
             {items.length === 0 ? (
               <p className="text-sm text-gray-500 text-center py-8">
-                No items yet. Add a lesson or a note above.
+                No items yet. Add a lesson, note, file, or link above.
               </p>
             ) : (
               <DndContext

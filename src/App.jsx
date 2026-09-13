@@ -27,6 +27,8 @@ import TeacherCsvImport from './pages/TeacherCsvImport';
 import TeacherAssignmentNew from './pages/TeacherAssignmentNew';
 import TeacherAssignmentDetail from './pages/TeacherAssignmentDetail';
 import TeacherCalendar from './pages/TeacherCalendar';
+import TeacherGradebook from './pages/TeacherGradebook';
+import TeacherGradeSetup from './pages/TeacherGradeSetup';
 
 import StudentDashboard from './pages/StudentDashboard';
 import StudentAssignmentDetail from './pages/StudentAssignmentDetail';
@@ -71,6 +73,14 @@ function App() {
             <Route
               path="/classes/:id/assignments/:assignmentId"
               element={<TeacherAssignmentDetail />}
+            />
+            <Route
+              path="/classes/:id/gradebook"
+              element={<TeacherGradebook />}
+            />
+            <Route
+              path="/classes/:id/grade-setup"
+              element={<TeacherGradeSetup />}
             />
 
             <Route path="/calendar" element={<TeacherCalendar />} />

@@ -2,7 +2,37 @@
 import { supabase } from './supabaseClient';
 import { duplicateLesson } from './api';
 
+// ---------- attachment constants ----------
+
+const ATTACHMENT_BUCKET = 'assignment-attachments';
+const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024; // 25 MB
+const ATTACHMENT_SIGNED_URL_SECONDS = 60 * 60; // 60 minutes
+
+// Extension whitelist. We validate by extension, not MIME, because
+// browsers report .tex / .r / .csv with blank or inconsistent MIME types.
+const ALLOWED_EXTENSIONS = new Set([
+  // documents
+  '.pdf', '.doc', '.docx', '.odt', '.rtf', '.txt', '.md', '.tex', '.pages',
+  // spreadsheets
+  '.xls', '.xlsx', '.ods', '.csv', '.numbers',
+  // presentations
+  '.ppt', '.pptx', '.odp', '.key',
+  // images
+  '.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif', '.bmp', '.svg',
+  // audio
+  '.mp3', '.wav', '.m4a', '.ogg', '.aac', '.flac',
+  // code / data
+  '.r', '.rmd', '.ipynb',
+]);
+
+// Archive formats we refuse with a specific error message (extra clarity).
+const BLOCKED_ARCHIVE_EXTENSIONS = new Set(['.zip', '.rar', '.7z', '.tar', '.gz']);
+
+// Audio extensions that play inline in the student view instead of downloading.
+const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.ogg', '.aac', '.flac']);
+
 // ---------- helpers ----------
+
 export function formatJst(iso, opts = {}) {
   if (!iso) return '';
   try {
@@ -49,6 +79,94 @@ function stripCopySuffix(title) {
 export function stripHtml(html) {
   if (!html) return '';
   return String(html).replace(/<[^>]*>/g, '').trim();
+}
+
+// ---------- attachment helpers (exported for the UI) ----------
+
+function getExtension(fileName) {
+  if (!fileName) return '';
+  const name = String(fileName);
+  const lastDot = name.lastIndexOf('.');
+  if (lastDot < 0) return '';
+  return name.slice(lastDot).toLowerCase();
+}
+
+export function isAllowedAttachment(file) {
+  if (!file || !file.name) return false;
+  const ext = getExtension(file.name);
+  return ALLOWED_EXTENSIONS.has(ext);
+}
+
+export function isAudioAttachment(fileName) {
+  return AUDIO_EXTENSIONS.has(getExtension(fileName));
+}
+
+export function allowedAttachmentExtensions() {
+  return Array.from(ALLOWED_EXTENSIONS).sort();
+}
+
+export function attachmentMaxBytes() {
+  return ATTACHMENT_MAX_BYTES;
+}
+
+export function formatFileSize(bytes) {
+  if (bytes == null || isNaN(bytes)) return '';
+  const n = Number(bytes);
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function validateAttachment(file) {
+  if (!file) throw new Error('No file selected.');
+  if (typeof file.size !== 'number') {
+    throw new Error('That is not a file. Please choose a file from your device.');
+  }
+  if (file.size > ATTACHMENT_MAX_BYTES) {
+    throw new Error(
+      `That file is too large. The maximum is ${formatFileSize(ATTACHMENT_MAX_BYTES)}.`
+    );
+  }
+  const ext = getExtension(file.name);
+  if (!ext) {
+    throw new Error('That file has no extension, so we cannot check its type.');
+  }
+  if (BLOCKED_ARCHIVE_EXTENSIONS.has(ext)) {
+    throw new Error(
+      `Archive files (${ext}) are not allowed. Please upload the individual files.`
+    );
+  }
+  if (!ALLOWED_EXTENSIONS.has(ext)) {
+    throw new Error(
+      `File type "${ext}" is not allowed. Allowed types: ${allowedAttachmentExtensions().join(', ')}.`
+    );
+  }
+}
+
+function generateUuid() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+function sanitizeFileName(name) {
+  return String(name)
+    .replace(/[\/\\]/g, '_')
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .replace(/\s+/g, '_')
+    .slice(0, 200) || 'file';
+}
+
+function buildAttachmentPath(assignmentId, itemId, fileName) {
+  const uuid = generateUuid();
+  const safe = sanitizeFileName(fileName);
+  return `assignments/${assignmentId}/${itemId}/${uuid}-${safe}`;
 }
 
 // ---------- library reads ----------
@@ -105,7 +223,7 @@ export async function listAssignmentItems(assignmentId) {
   const { data, error } = await supabase
     .from('assignment_items')
     .select(
-      'id, assignment_id, position, type, title, body, lesson_id, is_optional, created_at, lesson:lessons(id, title, share_slug, level, status)'
+      'id, assignment_id, position, type, title, body, lesson_id, is_optional, url, file_path, file_name, file_size, mime_type, created_at, lesson:lessons(id, title, share_slug, level, status)'
     )
     .eq('assignment_id', assignmentId)
     .order('position', { ascending: true });
@@ -122,7 +240,7 @@ export async function getAssignmentItemById(itemId) {
   const { data, error } = await supabase
     .from('assignment_items')
     .select(
-      'id, assignment_id, position, type, title, body, lesson_id, lesson:lessons(id, title, share_slug, level, status)'
+      'id, assignment_id, position, type, title, body, lesson_id, url, file_path, file_name, file_size, mime_type, lesson:lessons(id, title, share_slug, level, status)'
     )
     .eq('id', itemId)
     .maybeSingle();
@@ -177,7 +295,6 @@ export async function createBareAssignment({
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error('Not logged in');
 
-  // Find highest existing position in this class.
   const { data: topRows } = await supabase
     .from('assignments')
     .select('position')
@@ -207,8 +324,6 @@ export async function createBareAssignment({
   return data;
 }
 
-// Persist a new order for a list of assignment IDs (top → bottom on screen).
-// Internally we store the top row with the highest position.
 export async function reorderAssignments(orderedIds) {
   if (!orderedIds || orderedIds.length === 0) return;
   const total = orderedIds.length;
@@ -224,6 +339,16 @@ export async function reorderAssignments(orderedIds) {
   const results = await Promise.all(updates);
   const firstErr = results.find((r) => r.error);
   if (firstErr) throw firstErr.error;
+}
+
+async function nextItemPosition(assignmentId) {
+  const { data } = await supabase
+    .from('assignment_items')
+    .select('position')
+    .eq('assignment_id', assignmentId)
+    .order('position', { ascending: false })
+    .limit(1);
+  return data && data[0] ? data[0].position + 1 : 0;
 }
 
 export async function addLessonItem({
@@ -247,14 +372,7 @@ export async function addLessonItem({
     throw tagErr;
   }
 
-  const { data: existingItems } = await supabase
-    .from('assignment_items')
-    .select('position')
-    .eq('assignment_id', assignmentId)
-    .order('position', { ascending: false })
-    .limit(1);
-  const nextPos = existingItems && existingItems[0] ? existingItems[0].position + 1 : 0;
-
+  const nextPos = await nextItemPosition(assignmentId);
   const itemTitle = (title && title.trim()) || cleanTitle || 'Lesson';
 
   const { data, error } = await supabase
@@ -276,14 +394,7 @@ export async function addLessonItem({
 }
 
 export async function addTextItem({ assignmentId, title, body }) {
-  const { data: existingItems } = await supabase
-    .from('assignment_items')
-    .select('position')
-    .eq('assignment_id', assignmentId)
-    .order('position', { ascending: false })
-    .limit(1);
-  const nextPos = existingItems && existingItems[0] ? existingItems[0].position + 1 : 0;
-
+  const nextPos = await nextItemPosition(assignmentId);
   const { data, error } = await supabase
     .from('assignment_items')
     .insert({
@@ -292,6 +403,61 @@ export async function addTextItem({ assignmentId, title, body }) {
       type: 'text',
       title: (title || '').trim() || 'Note',
       body: body || '',
+    })
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+// Create a bare 'file' item (no file yet). The caller then calls
+// attachFileToItem to upload and fill in file metadata.
+export async function addFileItem({ assignmentId, title }) {
+  const nextPos = await nextItemPosition(assignmentId);
+  const { data, error } = await supabase
+    .from('assignment_items')
+    .insert({
+      assignment_id: assignmentId,
+      position: nextPos,
+      type: 'file',
+      title: (title || '').trim() || 'File',
+    })
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+// Create a 'link' item pointing at an external URL. The optional
+// description is stored in the existing 'body' column.
+//
+// allowEmptyUrl is used when the teacher page wants to insert the item
+// first and let the teacher fill in the URL on the card. The page is
+// responsible for validating the URL before saving it later.
+export async function addLinkItem({
+  assignmentId,
+  title,
+  url,
+  description,
+  allowEmptyUrl = false,
+}) {
+  const cleanUrl = (url || '').trim();
+  if (!allowEmptyUrl) {
+    if (!cleanUrl) throw new Error('Please enter a URL.');
+    if (!/^https?:\/\//i.test(cleanUrl)) {
+      throw new Error('The URL must start with http:// or https://');
+    }
+  }
+  const nextPos = await nextItemPosition(assignmentId);
+  const { data, error } = await supabase
+    .from('assignment_items')
+    .insert({
+      assignment_id: assignmentId,
+      position: nextPos,
+      type: 'link',
+      title: (title || '').trim() || 'Link',
+      url: cleanUrl || null,
+      body: description || '',
     })
     .select()
     .single();
@@ -313,7 +479,7 @@ export async function updateAssignmentItem(itemId, patch) {
 export async function deleteAssignmentItem(itemId) {
   const { data: item, error: getErr } = await supabase
     .from('assignment_items')
-    .select('id, type, lesson_id')
+    .select('id, type, lesson_id, file_path')
     .eq('id', itemId)
     .maybeSingle();
   if (getErr) throw getErr;
@@ -324,6 +490,10 @@ export async function deleteAssignmentItem(itemId) {
     .delete()
     .eq('id', itemId);
   if (delErr) throw delErr;
+
+  if (item.type === 'file' && item.file_path) {
+    try { await deleteAttachment(item.file_path); } catch { /* ignore */ }
+  }
 
   if (item.type === 'lesson' && item.lesson_id) {
     const { data: subs } = await supabase
@@ -386,9 +556,18 @@ export async function deleteAssignment(id) {
   const lessonIds = items
     .filter((it) => it.type === 'lesson' && it.lesson_id)
     .map((it) => it.lesson_id);
+  const filePaths = items
+    .filter((it) => it.type === 'file' && it.file_path)
+    .map((it) => it.file_path);
 
   const { error: aErr } = await supabase.from('assignments').delete().eq('id', id);
   if (aErr) throw aErr;
+
+  if (filePaths.length > 0) {
+    try {
+      await supabase.storage.from(ATTACHMENT_BUCKET).remove(filePaths);
+    } catch { /* best effort */ }
+  }
 
   if (lessonIds.length > 0) {
     for (const lid of lessonIds) {
@@ -402,6 +581,99 @@ export async function deleteAssignment(id) {
       }
     }
   }
+}
+
+// ---------- attachments (storage) ----------
+
+export async function uploadAttachment(file, assignmentId, itemId) {
+  validateAttachment(file);
+  const path = buildAttachmentPath(assignmentId, itemId, file.name);
+
+  const { error } = await supabase.storage
+    .from(ATTACHMENT_BUCKET)
+    .upload(path, file, {
+      cacheControl: '3600',
+      upsert: false,
+      contentType: file.type || undefined,
+    });
+  if (error) throw error;
+
+  return {
+    path,
+    name: file.name,
+    size: file.size,
+    mime_type: file.type || null,
+  };
+}
+
+export async function deleteAttachment(filePath) {
+  if (!filePath) return;
+  const { error } = await supabase.storage
+    .from(ATTACHMENT_BUCKET)
+    .remove([filePath]);
+  if (error) throw error;
+}
+
+export async function getAttachmentSignedUrl(filePath, opts = {}) {
+  if (!filePath) throw new Error('No file path provided.');
+  const {
+    download = true,
+    fileName = null,
+    expiresIn = ATTACHMENT_SIGNED_URL_SECONDS,
+  } = opts;
+
+  const options = {};
+  if (download) {
+    options.download = fileName || true;
+  }
+
+  const { data, error } = await supabase.storage
+    .from(ATTACHMENT_BUCKET)
+    .createSignedUrl(filePath, expiresIn, options);
+  if (error) throw error;
+  if (!data || !data.signedUrl) {
+    throw new Error('Could not create a download link.');
+  }
+  return data.signedUrl;
+}
+
+export async function attachFileToItem({ itemId, assignmentId, file, oldPath = null }) {
+  validateAttachment(file);
+  const path = buildAttachmentPath(assignmentId, itemId, file.name);
+
+  const { error: upErr } = await supabase.storage
+    .from(ATTACHMENT_BUCKET)
+    .upload(path, file, {
+      cacheControl: '3600',
+      upsert: false,
+      contentType: file.type || undefined,
+    });
+  if (upErr) throw upErr;
+
+  const patch = {
+    file_path: path,
+    file_name: file.name,
+    file_size: file.size,
+    mime_type: file.type || null,
+  };
+
+  const { data, error: dbErr } = await supabase
+    .from('assignment_items')
+    .update({ ...patch, updated_at: new Date().toISOString() })
+    .eq('id', itemId)
+    .select()
+    .single();
+
+  if (dbErr) {
+    try { await deleteAttachment(path); } catch { /* ignore */ }
+    throw dbErr;
+  }
+
+  if (oldPath && oldPath !== path) {
+    try { await deleteAttachment(oldPath); } catch { /* best effort */ }
+  }
+
+  return data;
 }
 
 // ---------- submissions ----------
