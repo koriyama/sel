@@ -8,7 +8,34 @@ import { listAssignmentsForStudent, formatJst } from '../lib/assignmentsApi';
 import { getMyAssignmentProgress } from '../lib/studentSubmissionApi';
 import { getStudentRollingGradeForClass } from '../lib/gradebookApi';
 import { listStudentCalendarAssignments } from '../lib/calendarApi';
+import {
+  listRecordsForStudent,
+  getClassAttendanceSettings,
+} from '../lib/attendanceApi';
 import DueSoonStrip from '../components/DueSoonStrip';
+
+function fmtPts(n) {
+  if (n == null) return '0';
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+
+function attendanceColor(pct) {
+  if (pct == null) return 'text-gray-400';
+  if (pct >= 80) return 'text-green-700';
+  if (pct >= 60) return 'text-gray-700';
+  if (pct >= 40) return 'text-amber-700';
+  return 'text-red-700';
+}
+
+function statusDisplay(status) {
+  switch (status) {
+    case 'present': return { text: 'Present', cls: 'text-green-700' };
+    case 'late':    return { text: 'Late',    cls: 'text-amber-700' };
+    case 'absent':  return { text: 'Absent',  cls: 'text-red-700' };
+    case 'excused': return { text: 'Excused', cls: 'text-blue-700' };
+    default:        return { text: 'Unmarked', cls: 'text-gray-400' };
+  }
+}
 
 const StudentDashboard = () => {
   const { displayName, institutionalId, logout, user } = useAuth();
@@ -17,6 +44,8 @@ const StudentDashboard = () => {
   const [progress, setProgress] = useState({});
   const [calendarAssignments, setCalendarAssignments] = useState([]);
   const [rollingGrades, setRollingGrades] = useState({});
+  const [attendanceByClass, setAttendanceByClass] = useState({});
+  const [expandedAttendance, setExpandedAttendance] = useState({});
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
@@ -38,7 +67,6 @@ const StudentDashboard = () => {
         const prog = await getMyAssignmentProgress(ids);
         if (!cancelled) setProgress(prog);
 
-        // Rolling grade per class, in parallel.
         const gradeEntries = await Promise.all(
           c.map(async (cls) => {
             try {
@@ -57,6 +85,28 @@ const StudentDashboard = () => {
           }
           setRollingGrades(map);
         }
+
+        const attendanceEntries = await Promise.all(
+          c.map(async (cls) => {
+            try {
+              const [recs, settings] = await Promise.all([
+                listRecordsForStudent(cls.id, user.id),
+                getClassAttendanceSettings(cls.id),
+              ]);
+              return [cls.id, { ...recs, settings }];
+            } catch (err) {
+              console.error('Attendance failed for class', cls.id, err);
+              return [cls.id, null];
+            }
+          })
+        );
+        if (!cancelled) {
+          const map = {};
+          for (const [cid, att] of attendanceEntries) {
+            if (att) map[cid] = att;
+          }
+          setAttendanceByClass(map);
+        }
       } catch (err) {
         console.error(err);
         if (!cancelled) toast.error('Could not load your dashboard.');
@@ -72,6 +122,13 @@ const StudentDashboard = () => {
   const handleLogout = async () => {
     await logout();
     navigate('/student-login', { replace: true });
+  };
+
+  const toggleAttendance = (classId) => {
+    setExpandedAttendance((prev) => ({
+      ...prev,
+      [classId]: !prev[classId],
+    }));
   };
 
   const now = new Date();
@@ -108,6 +165,32 @@ const StudentDashboard = () => {
         Not started
       </span>
     );
+  };
+
+  const computeAttendance = (att) => {
+    if (!att || !att.sessions || att.sessions.length === 0) return null;
+    const perSession = Number(att.settings?.attendance_points_per_session ?? 1);
+    const recordsBySession = {};
+    for (const r of att.records || []) recordsBySession[r.session_id] = r;
+    let earned = 0;
+    let max = 0;
+    let marked = 0;
+    for (const s of att.sessions) {
+      const rec = recordsBySession[s.id];
+      if (rec) {
+        earned += Number(rec.points_awarded);
+        max += perSession;
+        marked += 1;
+      }
+    }
+    if (marked === 0) return null;
+    return {
+      earned,
+      max,
+      marked,
+      total: att.sessions.length,
+      pct: max > 0 ? (earned / max) * 100 : null,
+    };
   };
 
   return (
@@ -160,6 +243,9 @@ const StudentDashboard = () => {
             <ul className="space-y-3">
               {classes.map((c) => {
                 const g = rollingGrades[c.id];
+                const att = attendanceByClass[c.id];
+                const attTotals = computeAttendance(att);
+                const isExpanded = !!expandedAttendance[c.id];
                 return (
                   <li key={c.id} className="bg-white p-4 rounded-lg shadow">
                     <div className="flex items-center gap-2">
@@ -170,23 +256,129 @@ const StudentDashboard = () => {
                       <h3 className="text-base font-semibold text-gray-900">
                         {c.name}
                       </h3>
+                      <Link
+                        to={`/student/classes/${c.id}/forums`}
+                        className="ml-auto text-xs text-indigo-600 hover:text-indigo-500"
+                      >
+                        Forums →
+                      </Link>
                     </div>
                     {c.description && (
                       <p className="text-sm text-gray-600 mt-1">
                         {c.description}
                       </p>
                     )}
-                    {g && g.rolling_grade != null && (
-                      <p className="text-sm text-gray-700 mt-2">
-                        <span className="text-gray-500">Current grade:</span>{' '}
-                        <span className="font-semibold">
-                          {g.rolling_grade}%
-                        </span>
-                        <span className="text-xs text-gray-400 ml-2">
-                          ({g.total_earned_points} / {g.total_possible_points} pts)
-                        </span>
-                      </p>
+
+                    {g && g.final_percent != null && (
+                      <div className="mt-2">
+                        <p className="text-sm text-gray-700 flex items-center gap-2 flex-wrap">
+                          <span className="text-gray-500">Current grade:</span>
+                          <span className="font-semibold">
+                            {g.final_percent}%
+                          </span>
+                          {g.final_letter && (
+                            <span className="font-semibold text-indigo-700">
+                              ({g.final_letter})
+                            </span>
+                          )}
+                          {g.pass_fail === 'pass' && (
+                            <span className="text-[11px] px-1.5 py-0.5 rounded bg-green-100 text-green-800 font-medium">
+                              PASS
+                            </span>
+                          )}
+                          {g.pass_fail === 'fail' && (
+                            <span className="text-[11px] px-1.5 py-0.5 rounded bg-red-100 text-red-800 font-medium">
+                              FAIL
+                            </span>
+                          )}
+                          <span className="text-xs text-gray-400">
+                            ({g.total_earned_points} / {g.total_possible_points} pts)
+                          </span>
+                        </p>
+                        {g.override_percent != null && g.rolling_grade != null && (
+                          <p className="text-xs text-gray-500 mt-0.5">
+                            Adjusted by your teacher from {g.rolling_grade}%.
+                          </p>
+                        )}
+                        {g.override_comment && (
+                          <div className="mt-1.5 text-xs text-blue-900 bg-blue-50 border border-blue-200 rounded-md px-2 py-1.5">
+                            <span className="font-semibold">Teacher note:</span>{' '}
+                            {g.override_comment}
+                          </div>
+                        )}
+                      </div>
                     )}
+
+                    {attTotals && (
+                      <div className="mt-2 pt-2 border-t border-gray-100">
+                        <button
+                          type="button"
+                          onClick={() => toggleAttendance(c.id)}
+                          className="w-full flex items-center gap-2 text-sm text-left -mx-1 px-1 py-0.5 rounded hover:bg-gray-50"
+                        >
+                          <span className="text-gray-500">Attendance:</span>
+                          <span
+                            className={
+                              'font-semibold ' + attendanceColor(attTotals.pct)
+                            }
+                          >
+                            {Math.round(attTotals.pct)}%
+                          </span>
+                          <span className="text-xs text-gray-400">
+                            ({fmtPts(attTotals.earned)} / {fmtPts(attTotals.max)} pts ·{' '}
+                            {attTotals.marked}/{attTotals.total} sessions)
+                          </span>
+                          <span className="ml-auto text-[10px] text-gray-400">
+                            {isExpanded ? '▲' : '▼'}
+                          </span>
+                        </button>
+
+                        {isExpanded && (
+                          <ul className="mt-2 pt-2 border-t border-gray-100 divide-y divide-gray-100">
+                            {att.sessions.map((s) => {
+                              const rec = (att.records || []).find(
+                                (r) => r.session_id === s.id
+                              );
+                              const status = statusDisplay(rec ? rec.status : null);
+                              return (
+                                <li
+                                  key={s.id}
+                                  className="py-1.5 flex items-center justify-between gap-2 text-xs"
+                                >
+                                  <div className="min-w-0">
+                                    <span className="font-medium text-gray-700">
+                                      {s.session_date}
+                                    </span>
+                                    {s.session_time && (
+                                      <span className="text-gray-500 ml-2">
+                                        {s.session_time}
+                                      </span>
+                                    )}
+                                    {s.label && (
+                                      <span className="text-gray-500 ml-2">
+                                        · {s.label}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-2 flex-shrink-0">
+                                    <span className={status.cls}>
+                                      {status.text}
+                                    </span>
+                                    {rec && (
+                                      <span className="text-gray-400">
+                                        {fmtPts(rec.points_awarded)} pt
+                                        {Number(rec.points_awarded) === 1 ? '' : 's'}
+                                      </span>
+                                    )}
+                                  </div>
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        )}
+                      </div>
+                    )}
+
                     <p className="text-xs text-gray-400 mt-2">
                       {c.start_date ? `Starts ${c.start_date}` : ''}
                       {c.start_date && c.end_date ? ' · ' : ''}

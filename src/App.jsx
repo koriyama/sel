@@ -5,6 +5,7 @@ import { Toaster } from 'react-hot-toast';
 import { AuthProvider } from './context/AuthContext';
 import { ConfirmProvider } from './context/ConfirmContext';
 import ProtectedRoute, { RequireAuth } from './components/ProtectedRoute';
+import AppLayout from './components/AppLayout';
 
 import Login from './pages/Login';
 import StudentLogin from './pages/StudentLogin';
@@ -29,6 +30,11 @@ import TeacherAssignmentDetail from './pages/TeacherAssignmentDetail';
 import TeacherCalendar from './pages/TeacherCalendar';
 import TeacherGradebook from './pages/TeacherGradebook';
 import TeacherGradeSetup from './pages/TeacherGradeSetup';
+import TeacherAttendance from './pages/TeacherAttendance';
+
+import ClassForums from './pages/ClassForums';
+import ForumView from './pages/ForumView';
+import ForumThreadView from './pages/ForumThreadView';
 
 import StudentDashboard from './pages/StudentDashboard';
 import StudentAssignmentDetail from './pages/StudentAssignmentDetail';
@@ -43,6 +49,7 @@ function App() {
       <ConfirmProvider>
         <Toaster position="top-right" toastOptions={{ duration: 3000 }} />
         <Routes>
+          {/* Public routes: no identity banner */}
           <Route path="/login" element={<Login />} />
           <Route path="/student-login" element={<StudentLogin />} />
           <Route path="/signup" element={<Signup />} />
@@ -51,51 +58,85 @@ function App() {
           <Route path="/lesson/:slug" element={<StudentLesson />} />
           <Route path="/go/:slug" element={<GoRedirect />} />
 
-          <Route element={<RequireAuth />}>
-            <Route path="/change-password" element={<ChangePassword />} />
-          </Route>
+          {/* Authenticated routes: wrapped in AppLayout so the banner
+              appears on every page. */}
+          <Route element={<AppLayout />}>
+            <Route element={<RequireAuth />}>
+              <Route path="/change-password" element={<ChangePassword />} />
+            </Route>
 
-          <Route element={<ProtectedRoute requiredRole="teacher" />}>
-            <Route path="/" element={<TeacherDashboard />} />
-            <Route path="/builder" element={<LessonBuilder />} />
-            <Route path="/builder/:id" element={<LessonBuilder />} />
-            <Route path="/results/:lessonId" element={<LessonResults />} />
-            <Route path="/library" element={<LessonLibrary />} />
-            <Route path="/public-library" element={<PublicLessonLibrary />} />
+            <Route element={<ProtectedRoute requiredRole="teacher" />}>
+              <Route path="/" element={<TeacherDashboard />} />
+              <Route path="/builder" element={<LessonBuilder />} />
+              <Route path="/builder/:id" element={<LessonBuilder />} />
+              <Route path="/results/:lessonId" element={<LessonResults />} />
+              <Route path="/library" element={<LessonLibrary />} />
+              <Route path="/public-library" element={<PublicLessonLibrary />} />
 
-            <Route path="/classes" element={<TeacherClasses />} />
-            <Route path="/classes/:id" element={<TeacherClassHome />} />
-            <Route path="/classes/:id/import" element={<TeacherCsvImport />} />
-            <Route
-              path="/classes/:id/assignments/new"
-              element={<TeacherAssignmentNew />}
-            />
-            <Route
-              path="/classes/:id/assignments/:assignmentId"
-              element={<TeacherAssignmentDetail />}
-            />
-            <Route
-              path="/classes/:id/gradebook"
-              element={<TeacherGradebook />}
-            />
-            <Route
-              path="/classes/:id/grade-setup"
-              element={<TeacherGradeSetup />}
-            />
+              <Route path="/classes" element={<TeacherClasses />} />
+              <Route path="/classes/:id" element={<TeacherClassHome />} />
+              <Route path="/classes/:id/import" element={<TeacherCsvImport />} />
+              <Route
+                path="/classes/:id/assignments/new"
+                element={<TeacherAssignmentNew />}
+              />
+              <Route
+                path="/classes/:id/assignments/:assignmentId"
+                element={<TeacherAssignmentDetail />}
+              />
+              <Route
+                path="/classes/:id/gradebook"
+                element={<TeacherGradebook />}
+              />
+              <Route
+                path="/classes/:id/grade-setup"
+                element={<TeacherGradeSetup />}
+              />
+              <Route
+                path="/classes/:id/attendance"
+                element={<TeacherAttendance />}
+              />
 
-            <Route path="/calendar" element={<TeacherCalendar />} />
+              <Route
+                path="/classes/:id/forums"
+                element={<ClassForums mode="teacher" />}
+              />
+              <Route
+                path="/classes/:id/forums/:forumId"
+                element={<ForumView mode="teacher" />}
+              />
+              <Route
+                path="/classes/:id/forums/:forumId/threads/:threadId"
+                element={<ForumThreadView mode="teacher" />}
+              />
 
-            <Route path="/payment" element={<Payment amount={1000} />} />
-            <Route path="/payment-success" element={<PaymentSuccess />} />
-          </Route>
+              <Route path="/calendar" element={<TeacherCalendar />} />
 
-          <Route element={<ProtectedRoute requiredRole="student" />}>
-            <Route path="/student" element={<StudentDashboard />} />
-            <Route
-              path="/student/assignments/:assignmentId"
-              element={<StudentAssignmentDetail />}
-            />
-            <Route path="/student/calendar" element={<StudentCalendar />} />
+              <Route path="/payment" element={<Payment amount={1000} />} />
+              <Route path="/payment-success" element={<PaymentSuccess />} />
+            </Route>
+
+            <Route element={<ProtectedRoute requiredRole="student" />}>
+              <Route path="/student" element={<StudentDashboard />} />
+              <Route
+                path="/student/assignments/:assignmentId"
+                element={<StudentAssignmentDetail />}
+              />
+              <Route path="/student/calendar" element={<StudentCalendar />} />
+
+              <Route
+                path="/student/classes/:id/forums"
+                element={<ClassForums mode="student" />}
+              />
+              <Route
+                path="/student/classes/:id/forums/:forumId"
+                element={<ForumView mode="student" />}
+              />
+              <Route
+                path="/student/classes/:id/forums/:forumId/threads/:threadId"
+                element={<ForumThreadView mode="student" />}
+              />
+            </Route>
           </Route>
 
           <Route

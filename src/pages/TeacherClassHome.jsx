@@ -24,12 +24,14 @@ import {
   removeStudentFromClass,
   resetStudentPassword,
   enrollStudentByInstitutionalId,
+  createSingleStudent,
 } from '../lib/lmsApi';
 import {
   listAssignmentsForClass,
   listClassLessonCopies,
   formatJst,
   reorderAssignments,
+  renameClass,
 } from '../lib/assignmentsApi';
 import PasswordRevealModal from '../components/PasswordRevealModal';
 
@@ -37,6 +39,7 @@ const TABS = [
   { key: 'assignments', label: 'Assignments', type: 'tab' },
   { key: 'lessons', label: 'Lessons', type: 'tab' },
   { key: 'people', label: 'People', type: 'tab' },
+  { key: 'forums', label: 'Forums', type: 'link', href: (id) => `/classes/${id}/forums` },
   { key: 'gradebook', label: 'Grade book', type: 'link', href: (id) => `/classes/${id}/gradebook` },
   { key: 'grade-setup', label: 'Grade setup', type: 'link', href: (id) => `/classes/${id}/grade-setup` },
 ];
@@ -125,8 +128,16 @@ export default function TeacherClassHome() {
     password: '',
   });
 
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
+  const [nameSaving, setNameSaving] = useState(false);
+
   const [addId, setAddId] = useState('');
   const [addBusy, setAddBusy] = useState(false);
+
+  const [newName, setNewName] = useState('');
+  const [newIid, setNewIid] = useState('');
+  const [createBusy, setCreateBusy] = useState(false);
 
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -160,6 +171,52 @@ export default function TeacherClassHome() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  const handleStartEditName = () => {
+    setNameDraft(cls?.name || '');
+    setEditingName(true);
+  };
+
+  const handleCancelEditName = () => {
+    if (nameSaving) return;
+    setEditingName(false);
+    setNameDraft('');
+  };
+
+  const handleSaveName = async (e) => {
+    if (e && typeof e.preventDefault === 'function') e.preventDefault();
+    const trimmed = nameDraft.trim();
+    if (!trimmed) {
+      toast.error('Class name cannot be empty.');
+      return;
+    }
+    if (trimmed === (cls?.name || '')) {
+      setEditingName(false);
+      return;
+    }
+    setNameSaving(true);
+    try {
+      const updated = await renameClass(id, trimmed);
+      setCls(updated);
+      toast.success('Class name updated.');
+      setEditingName(false);
+    } catch (err) {
+      console.error(err);
+      toast.error(err.message || 'Could not rename class.');
+    } finally {
+      setNameSaving(false);
+    }
+  };
+
+  const handleNameKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      handleSaveName();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      handleCancelEditName();
+    }
+  };
 
   const handleRemove = async (studentId, displayName) => {
     if (!window.confirm(`Remove ${displayName} from this class? Their account is kept.`)) return;
@@ -218,6 +275,61 @@ export default function TeacherClassHome() {
     }
   };
 
+  const handleCreateNewStudent = async (e) => {
+    if (e && typeof e.preventDefault === 'function') e.preventDefault();
+    const name = newName.trim();
+    const iid = newIid.trim();
+    if (!name) {
+      toast.error('Please enter a display name.');
+      return;
+    }
+    if (!iid) {
+      toast.error('Please enter an institutional ID.');
+      return;
+    }
+    setCreateBusy(true);
+    try {
+      const response = await createSingleStudent({
+        classId: id,
+        displayName: name,
+        institutionalId: iid,
+      });
+      const row = (response?.results || [])[0];
+      if (!row) {
+        toast.error('Unexpected response from server.');
+        return;
+      }
+      if (row.status === 'created') {
+        if (row.temp_password) {
+          setReveal({
+            open: true,
+            studentName: row.display_name,
+            password: row.temp_password,
+          });
+        } else {
+          toast.success(`Created ${row.display_name}.`);
+        }
+        setNewName('');
+        setNewIid('');
+        await load();
+      } else if (row.status === 'already_exists') {
+        toast.success(
+          `${row.display_name} already has an account and is now in this class.`
+        );
+        setNewName('');
+        setNewIid('');
+        await load();
+      } else {
+        toast.error(row.error || 'Could not create student.');
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error(err.message || 'Could not create student.');
+    } finally {
+      setCreateBusy(false);
+    }
+  };
+
   const handleAssignmentsDragEnd = async (event) => {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
@@ -257,12 +369,56 @@ export default function TeacherClassHome() {
     <div className="min-h-screen bg-gray-50">
       <div className="max-w-5xl mx-auto p-6">
         <div className="flex items-start justify-between mb-6 gap-4 flex-wrap">
-          <div>
+          <div className="min-w-0 flex-1">
             <Link to="/classes" className="text-sm text-indigo-600 hover:text-indigo-500">
               ← Back to classes
             </Link>
-            <h1 className="text-2xl font-bold text-gray-900 mt-1">{cls.name}</h1>
-            {cls.description && (
+
+            {editingName ? (
+              <form
+                onSubmit={handleSaveName}
+                className="mt-1 flex items-center gap-2 flex-wrap"
+              >
+                <input
+                  type="text"
+                  value={nameDraft}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  onKeyDown={handleNameKeyDown}
+                  autoFocus
+                  disabled={nameSaving}
+                  className="text-2xl font-bold text-gray-900 px-2 py-0.5 border border-indigo-400 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 min-w-[16rem]"
+                />
+                <button
+                  type="submit"
+                  disabled={nameSaving}
+                  className="py-1.5 px-3 text-sm bg-indigo-600 text-white rounded-md hover:bg-indigo-700 disabled:opacity-50"
+                >
+                  {nameSaving ? 'Saving…' : 'Save'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCancelEditName}
+                  disabled={nameSaving}
+                  className="py-1.5 px-3 text-sm text-gray-700 hover:text-gray-900 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+              </form>
+            ) : (
+              <h1 className="text-2xl font-bold text-gray-900 mt-1 flex items-center gap-2 flex-wrap">
+                <span className="truncate">{cls.name}</span>
+                <button
+                  type="button"
+                  onClick={handleStartEditName}
+                  className="text-xs font-normal text-gray-400 hover:text-indigo-600 border border-gray-300 hover:border-indigo-400 rounded-md px-2 py-0.5"
+                  title="Edit class name"
+                >
+                  Edit name
+                </button>
+              </h1>
+            )}
+
+            {cls.description && !editingName && (
               <p className="text-sm text-gray-600 mt-1">{cls.description}</p>
             )}
           </div>
@@ -391,6 +547,67 @@ export default function TeacherClassHome() {
         {tab === 'people' && (
           <section className="space-y-4">
             <form
+              onSubmit={handleCreateNewStudent}
+              className="bg-white rounded-lg shadow p-4"
+            >
+              <h3 className="text-sm font-semibold text-gray-900 mb-3">
+                Create a new student
+              </h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label
+                    htmlFor="new-student-name"
+                    className="block text-xs font-medium text-gray-700 mb-1"
+                  >
+                    Display name
+                  </label>
+                  <input
+                    id="new-student-name"
+                    type="text"
+                    value={newName}
+                    onChange={(e) => setNewName(e.target.value)}
+                    placeholder="e.g. Yuki Tanaka"
+                    autoComplete="off"
+                    disabled={createBusy}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="new-student-id"
+                    className="block text-xs font-medium text-gray-700 mb-1"
+                  >
+                    Institutional ID
+                  </label>
+                  <input
+                    id="new-student-id"
+                    type="text"
+                    value={newIid}
+                    onChange={(e) => setNewIid(e.target.value)}
+                    placeholder="e.g. YT2501"
+                    autoComplete="off"
+                    disabled={createBusy}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                  />
+                </div>
+              </div>
+              <div className="mt-3 flex items-center gap-3 flex-wrap">
+                <button
+                  type="submit"
+                  disabled={createBusy || !newName.trim() || !newIid.trim()}
+                  className="py-2 px-4 text-sm bg-gray-100 hover:bg-gray-200 text-gray-900 border border-gray-300 rounded-md disabled:opacity-50"
+                >
+                  {createBusy ? 'Creating…' : 'Create student'}
+                </button>
+                <p className="text-xs text-gray-500">
+                  A temporary password will be generated and shown to you. Give
+                  it to the student; they will be asked to change it at first
+                  login.
+                </p>
+              </div>
+            </form>
+
+            <form
               onSubmit={handleAddExistingStudent}
               className="bg-white rounded-lg shadow p-4"
             >
@@ -420,15 +637,15 @@ export default function TeacherClassHome() {
                 </button>
               </div>
               <p className="text-xs text-gray-500 mt-2">
-                The student must already have an account. To create new
-                accounts, use <span className="font-medium">Import students</span>.
+                Use this for students who already have an account. To create a
+                new one, use the form above.
               </p>
             </form>
 
             <div className="bg-white rounded-lg shadow">
               {roster.length === 0 ? (
                 <p className="p-8 text-center text-gray-500">
-                  No students yet. Import a CSV or add one by ID above.
+                  No students yet. Use one of the forms above.
                 </p>
               ) : (
                 <ul className="divide-y divide-gray-100">

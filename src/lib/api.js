@@ -165,7 +165,12 @@ export async function createLesson(fields, userId, folderId = null) {
       share_slug: makeSlug(),
       user_id: userId,
       folder_id: folderId || null,
-      is_public: fields.is_public || false
+      is_public: fields.is_public || false,
+      review_grading_mode: fields.review_grading_mode || 'holistic',
+      max_review_points:
+        fields.max_review_points === '' || fields.max_review_points === undefined
+          ? null
+          : fields.max_review_points
     })
     .select()
     .single()
@@ -200,6 +205,7 @@ export async function duplicateLesson(id, userId, folderId = null) {
   const original = await getLesson(id)
 
   // 2. Create the copy (lesson only)
+  //    Review-grading settings travel with the copy.
   const copy = await createLesson({
     title: `${original.title} (copy)`,
     level: original.level,
@@ -207,7 +213,9 @@ export async function duplicateLesson(id, userId, folderId = null) {
     description: original.description || null,
     audio_url: original.audio_url,
     images: original.images,
-    is_public: false  // always private for copies
+    is_public: false,  // always private for copies
+    review_grading_mode: original.review_grading_mode || 'holistic',
+    max_review_points: original.max_review_points ?? null
   }, userId, folderId)
 
   // 3. Fetch all sections, activities, vocabulary in ONE go (using the lesson ID)
@@ -330,24 +338,67 @@ export async function listSections(lessonId) {
   return sections || []
 }
 
+// NON-DESTRUCTIVE: preserves section IDs so activities that reference them
+// (and anything that references activities) stay connected.
 export async function saveSections(lessonId, sections) {
-  const { error: deleteError } = await supabase.from('sections').delete().eq('lesson_id', lessonId)
-  assertNoError(deleteError, 'Failed to clear old sections')
+  // 1. Fetch current section IDs for this lesson.
+  const { data: existing, error: fetchErr } = await supabase
+    .from('sections')
+    .select('id')
+    .eq('lesson_id', lessonId)
+  assertNoError(fetchErr, 'Failed to load existing sections')
 
-  if (!sections.length) return []
+  const existingIds = new Set((existing || []).map((r) => r.id))
 
-  const rows = sections.map((s, index) => ({
-    lesson_id: lessonId,
-    title: s.title || '',
-    intro_text: s.intro_text || '',
-    intro_text_en: s.intro_text_en || '',
-    intro_text_ja: s.intro_text_ja || '',
-    position: index
-  }))
+  // 2. Split into updates (rows that already exist) and inserts (new rows).
+  const updates = []
+  const inserts = []
+  sections.forEach((s, index) => {
+    const row = {
+      lesson_id: lessonId,
+      title: s.title || '',
+      intro_text: s.intro_text || '',
+      intro_text_en: s.intro_text_en || '',
+      intro_text_ja: s.intro_text_ja || '',
+      position: index,
+    }
+    if (s.id && existingIds.has(s.id)) {
+      updates.push({ ...row, id: s.id })
+    } else {
+      inserts.push(row)
+    }
+  })
 
-  const { data, error } = await supabase.from('sections').insert(rows).select()
-  assertNoError(error, 'Failed to save sections')
-  return [...data].sort((a, b) => a.position - b.position)
+  let savedSections = []
+  if (updates.length > 0) {
+    const { data, error } = await supabase
+      .from('sections')
+      .upsert(updates)
+      .select()
+    assertNoError(error, 'Failed to update sections')
+    savedSections.push(...(data || []))
+  }
+  if (inserts.length > 0) {
+    const { data, error } = await supabase
+      .from('sections')
+      .insert(inserts)
+      .select()
+    assertNoError(error, 'Failed to insert sections')
+    savedSections.push(...(data || []))
+  }
+
+  // 3. Delete sections that are no longer present.
+  const keepIds = new Set(updates.map((u) => u.id))
+  const toDelete = [...existingIds].filter((id) => !keepIds.has(id))
+  if (toDelete.length > 0) {
+    const { error: deleteErr } = await supabase
+      .from('sections')
+      .delete()
+      .in('id', toDelete)
+    assertNoError(deleteErr, 'Failed to delete removed sections')
+  }
+
+  return [...savedSections].sort((a, b) => a.position - b.position)
 }
 
 // ---------- activities ----------
@@ -366,15 +417,24 @@ export async function listActivities(lessonId) {
   return data || []
 }
 
+// NON-DESTRUCTIVE: preserves activity IDs so submissions.answers, responses
+// and review_grades rows that reference them stay connected across edits.
 export async function saveActivities(lessonId, activities, force = false) {
-  const { error: deleteError } = await supabase.from('activities').delete().eq('lesson_id', lessonId)
-  assertNoError(deleteError, 'Failed to clear old activities')
+  // 1. Fetch current activity IDs for this lesson.
+  const { data: existing, error: fetchErr } = await supabase
+    .from('activities')
+    .select('id')
+    .eq('lesson_id', lessonId)
+  assertNoError(fetchErr, 'Failed to load existing activities')
 
-  if (!activities.length) return []
+  const existingIds = new Set((existing || []).map((r) => r.id))
 
-  const rows = activities.map((a, index) => {
+  // 2. Split into updates and inserts.
+  const updates = []
+  const inserts = []
+  activities.forEach((a, index) => {
     const audioUrl = a.audio_url || a.config?.audio_url || null;
-    return {
+    const row = {
       lesson_id: lessonId,
       section_id: a.section_id ?? null,
       type: a.type,
@@ -384,14 +444,46 @@ export async function saveActivities(lessonId, activities, force = false) {
       config: a.config || {},
       points: a.points ?? 1,
       position: index,
-      audio_url: audioUrl
+      audio_url: audioUrl,
+    }
+    if (a.id && existingIds.has(a.id)) {
+      updates.push({ ...row, id: a.id })
+    } else {
+      inserts.push(row)
     }
   })
 
-  console.log('💾 Saving activities with audio_urls:', rows.map(r => ({ id: r.id, audio_url: r.audio_url })))
-  const { data, error } = await supabase.from('activities').insert(rows).select()
-  assertNoError(error, 'Failed to save activities')
-  return data
+  let savedActivities = []
+  if (updates.length > 0) {
+    const { data, error } = await supabase
+      .from('activities')
+      .upsert(updates)
+      .select()
+    assertNoError(error, 'Failed to update activities')
+    savedActivities.push(...(data || []))
+  }
+  if (inserts.length > 0) {
+    const { data, error } = await supabase
+      .from('activities')
+      .insert(inserts)
+      .select()
+    assertNoError(error, 'Failed to insert activities')
+    savedActivities.push(...(data || []))
+  }
+
+  // 3. Delete activities that are no longer present.
+  const keepIds = new Set(updates.map((u) => u.id))
+  const toDelete = [...existingIds].filter((id) => !keepIds.has(id))
+  if (toDelete.length > 0) {
+    const { error: deleteErr } = await supabase
+      .from('activities')
+      .delete()
+      .in('id', toDelete)
+    assertNoError(deleteErr, 'Failed to delete removed activities')
+  }
+
+  console.log('💾 saveActivities: updated', updates.length, 'inserted', inserts.length, 'deleted', toDelete.length)
+  return savedActivities
 }
 
 // ---------- vocabulary ----------
@@ -405,23 +497,63 @@ export async function listVocabulary(lessonId) {
   return data || []
 }
 
+// NON-DESTRUCTIVE for the same reasons as above. Nothing references vocabulary
+// rows yet, but this keeps the pattern consistent.
 export async function saveVocabulary(lessonId, items) {
-  const { error: deleteError } = await supabase.from('vocabulary').delete().eq('lesson_id', lessonId)
-  assertNoError(deleteError, 'Failed to clear old vocabulary')
+  const { data: existing, error: fetchErr } = await supabase
+    .from('vocabulary')
+    .select('id')
+    .eq('lesson_id', lessonId)
+  assertNoError(fetchErr, 'Failed to load existing vocabulary')
 
-  if (!items.length) return []
+  const existingIds = new Set((existing || []).map((r) => r.id))
 
-  const rows = items.map((v, index) => ({
-    lesson_id: lessonId,
-    term: v.term,
-    definition: v.definition,
-    example: v.example || '',
-    position: index
-  }))
+  const updates = []
+  const inserts = []
+  items.forEach((v, index) => {
+    const row = {
+      lesson_id: lessonId,
+      term: v.term,
+      definition: v.definition,
+      example: v.example || '',
+      position: index,
+    }
+    if (v.id && existingIds.has(v.id)) {
+      updates.push({ ...row, id: v.id })
+    } else {
+      inserts.push(row)
+    }
+  })
 
-  const { data, error } = await supabase.from('vocabulary').insert(rows).select()
-  assertNoError(error, 'Failed to save vocabulary')
-  return data
+  let saved = []
+  if (updates.length > 0) {
+    const { data, error } = await supabase
+      .from('vocabulary')
+      .upsert(updates)
+      .select()
+    assertNoError(error, 'Failed to update vocabulary')
+    saved.push(...(data || []))
+  }
+  if (inserts.length > 0) {
+    const { data, error } = await supabase
+      .from('vocabulary')
+      .insert(inserts)
+      .select()
+    assertNoError(error, 'Failed to insert vocabulary')
+    saved.push(...(data || []))
+  }
+
+  const keepIds = new Set(updates.map((u) => u.id))
+  const toDelete = [...existingIds].filter((id) => !keepIds.has(id))
+  if (toDelete.length > 0) {
+    const { error: deleteErr } = await supabase
+      .from('vocabulary')
+      .delete()
+      .in('id', toDelete)
+    assertNoError(deleteErr, 'Failed to delete removed vocabulary')
+  }
+
+  return saved
 }
 
 // ---------- storage ----------
@@ -776,7 +908,9 @@ export async function importLessons(lessonsData, folderId, userId) {
       description: lesson.description || null,
       audio_url: lesson.audio_url || null,
       images: lesson.images || [],
-      is_public: false // imported lessons are private by default
+      is_public: false, // imported lessons are private by default
+      review_grading_mode: lesson.review_grading_mode || 'holistic',
+      max_review_points: lesson.max_review_points ?? null
     }, userId, folderId)
 
     let savedSections = []

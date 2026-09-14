@@ -129,13 +129,7 @@ export async function removeStudentFromClass(classId, studentId) {
 }
 
 // Add an existing student to a class by institutional ID. Delegates to
-// a SECURITY DEFINER SQL function, which handles permission checks,
-// case-insensitive lookup, and the "already enrolled" case.
-//
-// Returns the JSON payload from the function:
-//   { ok: true,  already_enrolled: false, student: {...} }  — newly added
-//   { ok: true,  already_enrolled: true,  student: {...} }  — was already in the class
-//   { ok: false, error: "..." }                             — problem
+// a SECURITY DEFINER SQL function.
 export async function enrollStudentByInstitutionalId(classId, institutionalId) {
   const { data, error } = await supabase.rpc(
     'enroll_student_by_institutional_id',
@@ -146,6 +140,25 @@ export async function enrollStudentByInstitutionalId(classId, institutionalId) {
   );
   if (error) throw error;
   return data;
+}
+
+// Create ONE brand new student account and enrol in the class.
+// Reuses the same Edge Function as the CSV importer, with a single row.
+// Returns { results: [ { institutional_id, display_name, status,
+//                        temp_password?, user_id?, error? } ] }
+// where status is 'created' | 'already_exists' | 'error'.
+export async function createSingleStudent({ classId, displayName, institutionalId }) {
+  const name = (displayName || '').trim();
+  const iid = (institutionalId || '').trim();
+  if (!name) throw new Error('Please enter a display name.');
+  if (!iid) throw new Error('Please enter an institutional ID.');
+
+  const response = await callAdminStudentManager({
+    action: 'create_bulk',
+    students: [{ institutional_id: iid, display_name: name }],
+    class_id: classId,
+  });
+  return response;
 }
 
 // ---------- Edge Function calls ----------

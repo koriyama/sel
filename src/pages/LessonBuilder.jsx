@@ -775,6 +775,13 @@ function normalizeConfig(type, config) {
   return cfg
 }
 
+// ---- Coerce a possibly-empty value into a number or null ----
+function toNullableNumber(value) {
+  if (value === '' || value === null || value === undefined) return null
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
 // ---- Main Builder Component ----
 export default function LessonBuilder() {
   console.log('✅ LessonBuilder rendered (folder‑aware navigation with fallback)');
@@ -856,7 +863,9 @@ export default function LessonBuilder() {
         description: '',
         audio_url: null, 
         images: [], 
-        is_public: false 
+        is_public: false,
+        review_grading_mode: 'holistic',
+        max_review_points: null
       })
       setShowTemplateModal(true)
       setSections([])
@@ -965,7 +974,9 @@ export default function LessonBuilder() {
           audio_url: lesson.audio_url,
           images: lesson.images || [],
           folder_id: selectedFolderId,
-          is_public: lesson.is_public || false
+          is_public: lesson.is_public || false,
+          review_grading_mode: lesson.review_grading_mode || 'holistic',
+          max_review_points: toNullableNumber(lesson.max_review_points)
         })
       } else {
         savedLesson = await createLesson({
@@ -975,7 +986,9 @@ export default function LessonBuilder() {
           description: lesson.description || null,
           audio_url: lesson.audio_url,
           images: lesson.images || [],
-          is_public: lesson.is_public || false
+          is_public: lesson.is_public || false,
+          review_grading_mode: lesson.review_grading_mode || 'holistic',
+          max_review_points: toNullableNumber(lesson.max_review_points)
         }, user.id, selectedFolderId)
       }
 
@@ -1207,7 +1220,9 @@ export default function LessonBuilder() {
       reading_text: lesson.reading_text || '',
       description: lesson.description || '',
       audio_url: lesson.audio_url || null,
-      images: lesson.images || []
+      images: lesson.images || [],
+      review_grading_mode: lesson.review_grading_mode || 'holistic',
+      max_review_points: toNullableNumber(lesson.max_review_points)
     }
 
     const cleanSections = sections.map(section => {
@@ -1273,7 +1288,9 @@ export default function LessonBuilder() {
           description: data.lesson.description || '',
           audio_url: data.lesson.audio_url || null,
           images: data.lesson.images || [],
-          is_public: data.lesson.is_public || false
+          is_public: data.lesson.is_public || false,
+          review_grading_mode: data.lesson.review_grading_mode || 'holistic',
+          max_review_points: toNullableNumber(data.lesson.max_review_points)
         })
 
         let importedSections = data.sections || []
@@ -1438,6 +1455,7 @@ export default function LessonBuilder() {
 
   const isPublished = lesson.status === 'published'
   const activityCount = activities.length
+  const reviewMode = lesson.review_grading_mode || 'holistic'
 
   // ---- Main JSX ----
   return (
@@ -1647,6 +1665,77 @@ export default function LessonBuilder() {
             <p className="text-xs text-warm-400 mt-1">
               This description appears in the Shared Lessons repository. Leave blank if not needed.
             </p>
+          </div>
+
+          {/* ----- REVIEW GRADING PANEL ----- */}
+          <div className="border-l-4 border-purple-400 pl-4 bg-purple-50/30 rounded-r-card py-3 pr-4">
+            <label className="label flex items-center gap-2">
+              📝 Review grading
+              <span className="text-xs text-warm-400 font-normal">for teacher-marked activities</span>
+            </label>
+            <p className="text-xs text-warm-500 mb-3">
+              Short answer and reasoning activities are marked by you, not auto-graded. Choose how you want to mark them.
+            </p>
+
+            <div className="space-y-3">
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="review_grading_mode"
+                  value="holistic"
+                  checked={reviewMode === 'holistic'}
+                  onChange={() => setLesson({ ...lesson, review_grading_mode: 'holistic' })}
+                  className="mt-1 w-4 h-4 text-primary-600 focus:ring-primary-500"
+                />
+                <div>
+                  <div className="text-sm font-medium">Holistic — one mark for the whole submission</div>
+                  <div className="text-xs text-warm-500">
+                    Best for Response Cards or any task where the student's work is one piece.
+                  </div>
+                </div>
+              </label>
+
+              {reviewMode === 'holistic' && (
+                <div className="ml-6">
+                  <label className="text-xs font-medium text-warm-600">Maximum points</label>
+                  <input
+                    type="number"
+                    className="input-field text-sm mt-1 w-32"
+                    min={0}
+                    step="0.5"
+                    value={lesson.max_review_points ?? ''}
+                    onChange={(e) => {
+                      const v = e.target.value
+                      setLesson({
+                        ...lesson,
+                        max_review_points: v === '' ? null : Number(v)
+                      })
+                    }}
+                    placeholder="e.g. 5"
+                  />
+                  <p className="text-xs text-warm-400 mt-1">
+                    The whole submission is marked out of this number. Students see their mark out of the same number.
+                  </p>
+                </div>
+              )}
+
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="review_grading_mode"
+                  value="per_activity"
+                  checked={reviewMode === 'per_activity'}
+                  onChange={() => setLesson({ ...lesson, review_grading_mode: 'per_activity' })}
+                  className="mt-1 w-4 h-4 text-primary-600 focus:ring-primary-500"
+                />
+                <div>
+                  <div className="text-sm font-medium">Per activity — one mark per review activity</div>
+                  <div className="text-xs text-warm-500">
+                    Each review activity is marked out of its own Points value (set on the activity below).
+                  </div>
+                </div>
+              </label>
+            </div>
           </div>
 
           <div>

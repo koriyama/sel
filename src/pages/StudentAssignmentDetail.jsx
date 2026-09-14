@@ -11,6 +11,7 @@ import {
   isAudioAttachment,
 } from '../lib/assignmentsApi';
 import { getMyItemStatusMap } from '../lib/studentSubmissionApi';
+import { getReviewSummariesForItems } from '../lib/reviewGradesApi';
 
 function FileAttachment({ item }) {
   const [downloading, setDownloading] = useState(false);
@@ -151,6 +152,7 @@ export default function StudentAssignmentDetail() {
   const [assignment, setAssignment] = useState(null);
   const [items, setItems] = useState([]);
   const [statusMap, setStatusMap] = useState({});
+  const [reviewSummaries, setReviewSummaries] = useState({});
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
@@ -164,6 +166,17 @@ export default function StudentAssignmentDetail() {
         ]);
         setItems(its);
         setStatusMap(map);
+
+        try {
+          const summaries = await getReviewSummariesForItems({
+            items: its,
+            statusMap: map,
+          });
+          setReviewSummaries(summaries);
+        } catch (err) {
+          console.error('Could not load review summaries:', err);
+          setReviewSummaries({});
+        }
       }
     } catch (err) {
       console.error(err);
@@ -234,8 +247,6 @@ export default function StudentAssignmentDetail() {
     window.open(url, '_blank', 'noopener,noreferrer');
   };
 
-  // Only lessons show a status badge. Text notes, files, and links do
-  // not have completion status.
   const renderItemBadge = (item) => {
     if (item.type !== 'lesson') return null;
     const st = statusMap[item.id];
@@ -247,10 +258,19 @@ export default function StudentAssignmentDetail() {
       );
     }
     if (st.status === 'completed') {
-      const score = st.max_auto_score > 0 ? ` · ${st.score}%` : '';
+      const summary = reviewSummaries[item.id];
+      const pct =
+        summary && summary.overall_pct != null
+          ? Math.round(summary.overall_pct)
+          : st.score != null
+            ? Math.round(st.score)
+            : null;
+      const pending = summary && summary.review_pending > 0;
+      const scoreText = pct != null ? ` · ${pct}%` : '';
+      const pendingText = pending ? ' (pending review)' : '';
       return (
         <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-800">
-          ✅ Completed{score}
+          ✅ Completed{scoreText}{pendingText}
         </span>
       );
     }
@@ -261,16 +281,15 @@ export default function StudentAssignmentDetail() {
     );
   };
 
+  // Right-side action. Renders nothing when the lesson is completed and
+  // retakes are not allowed — the pill next to the title already shows
+  // "Completed · NN%", so a second "Completed" label would be redundant.
   const renderItemButton = (item) => {
     const st = statusMap[item.id];
     const completed = st && st.status === 'completed';
 
     if (completed && !allowRetakes) {
-      return (
-        <span className="flex-shrink-0 py-2 px-4 bg-gray-100 text-gray-600 text-sm font-medium rounded-md">
-          ✅ Completed
-        </span>
-      );
+      return null;
     }
 
     const label = completed
@@ -287,6 +306,24 @@ export default function StudentAssignmentDetail() {
       >
         {label}
       </button>
+    );
+  };
+
+  const renderFeedback = (item) => {
+    if (item.type !== 'lesson') return null;
+    const summary = reviewSummaries[item.id];
+    if (!summary || !summary.comments || summary.comments.length === 0) return null;
+    return (
+      <div className="mt-3 text-sm bg-blue-50 border border-blue-200 rounded-md px-3 py-2 space-y-1">
+        <div className="text-xs font-semibold text-blue-900 uppercase tracking-wide">
+          Teacher feedback
+        </div>
+        {summary.comments.map((c, i) => (
+          <div key={i} className="text-blue-900 whitespace-pre-wrap">
+            {c.comment}
+          </div>
+        ))}
+      </div>
     );
   };
 
@@ -395,6 +432,7 @@ export default function StudentAssignmentDetail() {
 
                         {isFile && <FileAttachment item={item} />}
                         {isLink && <LinkAttachment item={item} />}
+                        {renderFeedback(item)}
                       </div>
 
                       {isLesson && renderItemButton(item)}

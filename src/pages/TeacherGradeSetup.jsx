@@ -8,12 +8,15 @@ import {
   createGradeCategory,
   updateGradeCategory,
   deleteGradeCategory,
+  SYSTEM_DEFAULT_LETTER_BANDS,
 } from '../lib/gradebookApi';
 import {
   getClassById,
   updateClass,
 } from '../lib/lmsApi';
 import { updateAssignment } from '../lib/assignmentsApi';
+import { updateClassAttendanceSettings } from '../lib/attendanceApi';
+import { supabase } from '../lib/supabaseClient';
 
 function EditableCategoryRow({ category, onSave, onDelete, busy }) {
   const [editing, setEditing] = useState(false);
@@ -46,6 +49,16 @@ function EditableCategoryRow({ category, onSave, onDelete, busy }) {
     setEditing(false);
   };
 
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      handleSave();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      handleCancel();
+    }
+  };
+
   if (editing) {
     return (
       <tr className="bg-indigo-50">
@@ -54,6 +67,7 @@ function EditableCategoryRow({ category, onSave, onDelete, busy }) {
             type="text"
             value={name}
             onChange={(e) => setName(e.target.value)}
+            onKeyDown={handleKeyDown}
             className="w-full px-2 py-1 border border-gray-300 rounded text-sm"
           />
         </td>
@@ -64,6 +78,7 @@ function EditableCategoryRow({ category, onSave, onDelete, busy }) {
             step="0.01"
             value={weight}
             onChange={(e) => setWeight(e.target.value)}
+            onKeyDown={handleKeyDown}
             className="w-24 px-2 py-1 border border-gray-300 rounded text-sm"
           />
         </td>
@@ -153,46 +168,534 @@ function NewCategoryForm({ onCancel, onSave, busy }) {
 
   return (
     <tr className="bg-gray-50">
-      <td className="px-3 py-2">
-        <input
-          type="text"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="Category name (e.g. Response Cards)"
-          className="w-full px-2 py-1 border border-gray-300 rounded text-sm"
-          autoFocus
-        />
-      </td>
-      <td className="px-3 py-2">
-        <input
-          type="number"
-          min="0"
-          step="0.01"
-          value={weight}
-          onChange={(e) => setWeight(e.target.value)}
-          placeholder="0"
-          className="w-24 px-2 py-1 border border-gray-300 rounded text-sm"
-        />
-      </td>
-      <td className="px-3 py-2 text-xs text-gray-400">new</td>
-      <td className="px-3 py-2 text-right">
-        <button
-          type="button"
-          onClick={handleSubmit}
-          disabled={busy}
-          className="text-xs text-indigo-600 hover:text-indigo-800 mr-3"
+      <td colSpan={4} className="px-3 py-2">
+        <form
+          onSubmit={handleSubmit}
+          className="flex items-center gap-2 flex-wrap"
         >
-          Create
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="text-xs text-gray-500 hover:text-gray-700"
-        >
-          Cancel
-        </button>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Category name (e.g. Response Cards)"
+            className="flex-1 min-w-[12rem] px-2 py-1 border border-gray-300 rounded text-sm"
+            autoFocus
+          />
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            value={weight}
+            onChange={(e) => setWeight(e.target.value)}
+            placeholder="Weight"
+            className="w-24 px-2 py-1 border border-gray-300 rounded text-sm"
+          />
+          <button
+            type="submit"
+            disabled={busy}
+            className="px-3 py-1 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50"
+          >
+            Create
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            className="text-xs text-gray-500 hover:text-gray-700"
+          >
+            Cancel
+          </button>
+        </form>
       </td>
     </tr>
+  );
+}
+
+function AttendancePanel({ cls, categories, classId, onSaved, busy: parentBusy }) {
+  const [pointsPerSession, setPointsPerSession] = useState(
+    String(cls?.attendance_points_per_session ?? 1)
+  );
+  const [latePenalty, setLatePenalty] = useState(
+    String(cls?.attendance_late_penalty ?? 0)
+  );
+  const [defaultTime, setDefaultTime] = useState(cls?.attendance_default_time || '');
+  const [categoryId, setCategoryId] = useState(cls?.attendance_category_id || '');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setPointsPerSession(String(cls?.attendance_points_per_session ?? 1));
+    setLatePenalty(String(cls?.attendance_late_penalty ?? 0));
+    setDefaultTime(cls?.attendance_default_time || '');
+    setCategoryId(cls?.attendance_category_id || '');
+  }, [
+    cls?.attendance_points_per_session,
+    cls?.attendance_late_penalty,
+    cls?.attendance_default_time,
+    cls?.attendance_category_id,
+  ]);
+
+  const handleSave = async () => {
+    const per = Number(pointsPerSession);
+    if (isNaN(per) || per < 0) {
+      toast.error('Points per session must be a non-negative number.');
+      return;
+    }
+    const late = Number(latePenalty);
+    if (isNaN(late) || late < 0) {
+      toast.error('Late penalty must be a non-negative number.');
+      return;
+    }
+    if (late > per) {
+      toast.error('Late penalty cannot exceed the points per session.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await updateClassAttendanceSettings(classId, {
+        attendance_points_per_session: per,
+        attendance_late_penalty: late,
+        attendance_default_time: defaultTime.trim() || null,
+        attendance_category_id: categoryId || null,
+      });
+      toast.success('Attendance settings saved.');
+      if (onSaved) await onSaved();
+    } catch (err) {
+      console.error(err);
+      toast.error(err.message || 'Could not save attendance settings.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      handleSave();
+    }
+  };
+
+  const disabled = busy || parentBusy;
+
+  return (
+    <section className="bg-white rounded-lg shadow mb-6 overflow-hidden">
+      <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">Attendance</h2>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Points per session, late penalty, and which grade category attendance
+            counts toward.
+          </p>
+        </div>
+        <Link
+          to={`/classes/${classId}/attendance`}
+          className="py-1.5 px-3 text-sm bg-gray-100 hover:bg-gray-200 text-gray-900 border border-gray-300 rounded-md"
+        >
+          Mark attendance
+        </Link>
+      </div>
+
+      <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <label className="block text-xs font-medium text-gray-600 mb-1">
+            Points per session
+          </label>
+          <input
+            type="number"
+            min="0"
+            step="0.5"
+            value={pointsPerSession}
+            onChange={(e) => setPointsPerSession(e.target.value)}
+            onKeyDown={handleKeyDown}
+            className="w-32 px-2 py-1 border border-gray-300 rounded text-sm"
+          />
+          <p className="text-[11px] text-gray-500 mt-1">
+            Present earns this many points. For a 14-week class worth 2 points each,
+            enter 2.
+          </p>
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-gray-600 mb-1">
+            Late penalty
+          </label>
+          <input
+            type="number"
+            min="0"
+            step="0.5"
+            value={latePenalty}
+            onChange={(e) => setLatePenalty(e.target.value)}
+            onKeyDown={handleKeyDown}
+            className="w-32 px-2 py-1 border border-gray-300 rounded text-sm"
+          />
+          <p className="text-[11px] text-gray-500 mt-1">
+            Subtracted from Present for Late. Set to 0 if lateness costs nothing.
+          </p>
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-gray-600 mb-1">
+            Default session time
+          </label>
+          <input
+            type="text"
+            value={defaultTime}
+            onChange={(e) => setDefaultTime(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="e.g. 14:00-15:30"
+            className="w-full px-2 py-1 border border-gray-300 rounded text-sm"
+          />
+          <p className="text-[11px] text-gray-500 mt-1">
+            Prefilled when you add a session or import from CSV.
+          </p>
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-gray-600 mb-1">
+            Counts toward category
+          </label>
+          <select
+            value={categoryId}
+            onChange={(e) => setCategoryId(e.target.value)}
+            className="w-full px-2 py-1 border border-gray-300 rounded text-sm"
+          >
+            <option value="">— Not counted —</option>
+            {categories.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name} (weight {c.weight})
+              </option>
+            ))}
+          </select>
+          <p className="text-[11px] text-gray-500 mt-1">
+            Pick the category that should hold attendance, e.g. Attendance 20.
+            Leave blank to keep attendance out of rolling grades.
+          </p>
+        </div>
+      </div>
+
+      <div className="px-4 py-3 border-t border-gray-100 flex justify-end">
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={disabled}
+          className="py-1.5 px-4 text-sm bg-indigo-600 text-white rounded-md hover:bg-indigo-700 disabled:opacity-50"
+        >
+          {busy ? 'Saving…' : 'Save attendance settings'}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------
+// Pass mark and letter grades panel (Phase 3d)
+// ---------------------------------------------------------------------
+
+function bandKey(b, i) {
+  // Stable key for editing rows. Uses index — acceptable because the list is
+  // small and reordering only happens on save.
+  return `band-${i}`;
+}
+
+function validateBands(bands) {
+  if (!bands || bands.length === 0) {
+    return 'Add at least one band, or clear the bands entirely.';
+  }
+  const labels = new Set();
+  const mins = new Set();
+  let lowest = null;
+  for (const b of bands) {
+    const label = (b.label || '').trim();
+    if (!label) return 'Every band needs a label (e.g. A, B, Pass).';
+    if (labels.has(label.toLowerCase())) {
+      return `Duplicate label "${label}". Labels must be unique.`;
+    }
+    labels.add(label.toLowerCase());
+
+    const m = Number(b.min);
+    if (!Number.isFinite(m) || m < 0 || m > 100) {
+      return `Minimum for "${label}" must be a number between 0 and 100.`;
+    }
+    if (mins.has(m)) {
+      return `Two bands share the minimum ${m}. Minimums must be unique.`;
+    }
+    mins.add(m);
+    if (lowest == null || m < lowest) lowest = m;
+  }
+  return { ok: true, lowest };
+}
+
+function GradeScalePanel({ cls, classId, onSaved, busy: parentBusy }) {
+  const [thresholdDraft, setThresholdDraft] = useState(
+    cls?.pass_threshold != null ? String(cls.pass_threshold) : ''
+  );
+  const [bands, setBands] = useState(() => {
+    const raw = cls?.letter_grade_bands;
+    if (Array.isArray(raw) && raw.length > 0) {
+      return raw
+        .map((b) => ({ label: String(b.label || ''), min: String(b.min ?? '') }))
+        .sort((a, b) => Number(b.min) - Number(a.min));
+    }
+    return [];
+  });
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setThresholdDraft(
+      cls?.pass_threshold != null ? String(cls.pass_threshold) : ''
+    );
+    const raw = cls?.letter_grade_bands;
+    if (Array.isArray(raw) && raw.length > 0) {
+      setBands(
+        raw
+          .map((b) => ({ label: String(b.label || ''), min: String(b.min ?? '') }))
+          .sort((a, b) => Number(b.min) - Number(a.min))
+      );
+    } else {
+      setBands([]);
+    }
+  }, [cls?.pass_threshold, cls?.letter_grade_bands]);
+
+  const hasBands = bands.length > 0;
+
+  const handleLoadSuggestions = () => {
+    setBands(
+      SYSTEM_DEFAULT_LETTER_BANDS.map((b) => ({
+        label: b.label,
+        min: String(b.min),
+      }))
+    );
+  };
+
+  const handleAddBand = () => {
+    setBands((prev) => [...prev, { label: '', min: '' }]);
+  };
+
+  const handleRemoveBand = (index) => {
+    setBands((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleBandChange = (index, field, value) => {
+    setBands((prev) =>
+      prev.map((b, i) => (i === index ? { ...b, [field]: value } : b))
+    );
+  };
+
+  const handleClearBands = () => {
+    if (!window.confirm('Remove all letter bands for this class?')) return;
+    setBands([]);
+  };
+
+  const handleSave = async () => {
+    // Validate threshold.
+    let thresholdValue = null;
+    const rawThreshold = thresholdDraft.trim();
+    if (rawThreshold !== '') {
+      const n = Number(rawThreshold);
+      if (!Number.isFinite(n) || n < 0 || n > 100) {
+        toast.error('Pass threshold must be a number between 0 and 100, or blank.');
+        return;
+      }
+      thresholdValue = n;
+    }
+
+    // Validate bands.
+    let bandsValue = null;
+    if (hasBands) {
+      const result = validateBands(bands);
+      if (result !== true && typeof result === 'string') {
+        toast.error(result);
+        return;
+      }
+      if (result && result.ok && result.lowest > 0) {
+        const proceed = window.confirm(
+          `Your lowest band starts at ${result.lowest}. Students below ${result.lowest}% ` +
+            `will not receive a letter. Continue anyway?`
+        );
+        if (!proceed) return;
+      }
+      bandsValue = bands
+        .map((b) => ({ label: b.label.trim(), min: Number(b.min) }))
+        .sort((a, b) => b.min - a.min);
+    }
+
+    setBusy(true);
+    try {
+      const { error } = await supabase
+        .from('classes')
+        .update({
+          pass_threshold: thresholdValue,
+          letter_grade_bands: bandsValue,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', classId);
+      if (error) throw error;
+      toast.success('Grade scale saved.');
+      if (onSaved) await onSaved();
+    } catch (err) {
+      console.error(err);
+      toast.error(err.message || 'Could not save grade scale.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const disabled = busy || parentBusy;
+
+  return (
+    <section className="bg-white rounded-lg shadow mb-6 overflow-hidden">
+      <div className="px-4 py-3 border-b border-gray-100">
+        <h2 className="text-lg font-semibold text-gray-900">
+          Pass mark and letter grades
+        </h2>
+        <p className="text-xs text-gray-500 mt-0.5">
+          Optional. Both fields are independent — set one, both, or neither.
+        </p>
+      </div>
+
+      <div className="p-4 space-y-6">
+        {/* Pass threshold */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Pass threshold
+          </label>
+          <div className="flex items-center gap-2 flex-wrap">
+            <input
+              type="number"
+              min="0"
+              max="100"
+              step="0.5"
+              value={thresholdDraft}
+              onChange={(e) => setThresholdDraft(e.target.value)}
+              placeholder="e.g. 60"
+              className="w-32 px-2 py-1 border border-gray-300 rounded text-sm"
+            />
+            <span className="text-sm text-gray-500">%</span>
+            {thresholdDraft !== '' && (
+              <button
+                type="button"
+                onClick={() => setThresholdDraft('')}
+                disabled={disabled}
+                className="text-xs text-gray-500 hover:text-red-600 disabled:opacity-50"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+          <p className="text-[11px] text-gray-500 mt-1">
+            A student at or above this percentage is marked as <strong>Pass</strong>.
+            Leave blank to hide pass/fail everywhere.
+          </p>
+        </div>
+
+        {/* Letter bands */}
+        <div>
+          <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+            <label className="block text-sm font-medium text-gray-700">
+              Letter grade bands
+            </label>
+            <div className="flex items-center gap-2">
+              {!hasBands && (
+                <button
+                  type="button"
+                  onClick={handleLoadSuggestions}
+                  disabled={disabled}
+                  className="text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-900 border border-gray-300 rounded-md disabled:opacity-50"
+                >
+                  Use suggestions
+                </button>
+              )}
+              {hasBands && (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleAddBand}
+                    disabled={disabled}
+                    className="text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-900 border border-gray-300 rounded-md disabled:opacity-50"
+                  >
+                    + Add band
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleLoadSuggestions}
+                    disabled={disabled}
+                    className="text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-900 border border-gray-300 rounded-md disabled:opacity-50"
+                  >
+                    Reset to suggestions
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleClearBands}
+                    disabled={disabled}
+                    className="text-xs px-2 py-1 text-red-600 hover:text-red-800 border border-red-200 rounded-md disabled:opacity-50"
+                  >
+                    Clear
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          {!hasBands && (
+            <div className="text-sm text-gray-500 border border-dashed border-gray-300 rounded-md px-3 py-4">
+              No letter bands set for this class. Students will not see a letter
+              grade. Click <strong>Use suggestions</strong> to start from
+              S/A/B/C/D, then edit.
+            </div>
+          )}
+
+          {hasBands && (
+            <div className="space-y-2">
+              {bands.map((b, i) => (
+                <div key={bandKey(b, i)} className="flex items-center gap-2 flex-wrap">
+                  <input
+                    type="text"
+                    value={b.label}
+                    onChange={(e) => handleBandChange(i, 'label', e.target.value)}
+                    placeholder="Label"
+                    className="w-20 px-2 py-1 border border-gray-300 rounded text-sm"
+                  />
+                  <span className="text-xs text-gray-500">starts at</span>
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.5"
+                    value={b.min}
+                    onChange={(e) => handleBandChange(i, 'min', e.target.value)}
+                    placeholder="0"
+                    className="w-20 px-2 py-1 border border-gray-300 rounded text-sm"
+                  />
+                  <span className="text-xs text-gray-500">% or above</span>
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveBand(i)}
+                    disabled={disabled}
+                    className="text-xs text-red-500 hover:text-red-700 disabled:opacity-50 ml-auto"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+              <p className="text-[11px] text-gray-500 pt-1">
+                Bands are checked top-down. A student at 87% with the default
+                scale gets <strong>A</strong>, because the A band (80) is
+                matched first.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="px-4 py-3 border-t border-gray-100 flex justify-end">
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={disabled}
+          className="py-1.5 px-4 text-sm bg-indigo-600 text-white rounded-md hover:bg-indigo-700 disabled:opacity-50"
+        >
+          {busy ? 'Saving…' : 'Save grade scale'}
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -218,7 +721,13 @@ export default function TeacherGradeSetup() {
       setCategories(cats);
       setWarnings(gb.warnings || []);
       setUncategorised(
-        gb.assignments.filter((a) => !a.category_id && a.grade_points_source !== 'manual')
+        gb.assignments
+          .filter(
+            (a) =>
+              !a.is_attendance &&
+              !a.category_id &&
+              a.grade_points_source !== 'manual'
+          )
           .map((a) => ({ id: a.id, title: a.title, raw_max: a.raw_max }))
       );
     } catch (err) {
@@ -370,7 +879,7 @@ export default function TeacherGradeSetup() {
         </div>
 
         {!useCategories && (
-          <section className="bg-white rounded-lg shadow p-6">
+          <section className="bg-white rounded-lg shadow p-6 mb-6">
             <h2 className="text-lg font-semibold text-gray-900 mb-2">
               Categories are off
             </h2>
@@ -394,6 +903,21 @@ export default function TeacherGradeSetup() {
             </button>
           </section>
         )}
+
+        <AttendancePanel
+          cls={cls}
+          categories={categories}
+          classId={classId}
+          onSaved={load}
+          busy={busy}
+        />
+
+        <GradeScalePanel
+          cls={cls}
+          classId={classId}
+          onSaved={load}
+          busy={busy}
+        />
 
         {useCategories && (
           <>

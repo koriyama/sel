@@ -40,7 +40,6 @@ export async function createMySubmission({
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error('Not logged in');
 
-  // Determine next attempt number for this exact context.
   let attemptQuery = supabase
     .from('submissions')
     .select('attempt_number')
@@ -94,16 +93,6 @@ export async function updateMySubmission(id, patch) {
 
 // For the student dashboard: for each assignment, return the
 // student's progress across its lesson items.
-//
-// Returns:
-//   {
-//     [assignment_id]: {
-//       totalLessonItems,   // number of lesson items in the assignment
-//       completedItems,     // number of lesson items with a completed submission
-//       startedItems,       // number with any submission (in_progress or completed)
-//       latestSubmission,   // the most recent submission across all items
-//     }
-//   }
 export async function getMyAssignmentProgress(assignmentIds) {
   if (!assignmentIds || assignmentIds.length === 0) return {};
   const { data: { user } } = await supabase.auth.getUser();
@@ -145,7 +134,6 @@ export async function getMyAssignmentProgress(assignmentIds) {
     if (it.type === 'lesson') bucket.totalLessonItems += 1;
   }
 
-  // Only the latest attempt per item counts.
   const latestByItem = {};
   for (const s of subs) {
     const key = s.assignment_item_id || `legacy_${s.assignment_id}`;
@@ -174,14 +162,14 @@ export async function getMyAssignmentProgress(assignmentIds) {
 }
 
 // For the assignment detail page: return the student's status for
-// each item in one assignment.
-//   Map of item_id -> { status, score, max_auto_score, attempt_number }
+// each item in one assignment. Now includes the submission id and the
+// raw answers blob so the caller can compute review-aware totals.
 export async function getMyItemStatusMap(assignmentId) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return {};
   const { data, error } = await supabase
     .from('submissions')
-    .select('assignment_item_id, status, score, max_auto_score, attempt_number')
+    .select('id, assignment_item_id, status, score, max_auto_score, attempt_number, answers')
     .eq('assignment_id', assignmentId)
     .eq('student_id', user.id);
   if (error) throw error;

@@ -42,6 +42,7 @@ import {
   formatFileSize,
   isAllowedAttachment,
   attachmentMaxBytes,
+  duplicateAssignment,
 } from '../lib/assignmentsApi';
 import {
   listGradeCategories,
@@ -73,6 +74,21 @@ function typeClass(t) {
   if (t === 'file') return 'bg-slate-100 text-slate-800';
   if (t === 'link') return 'bg-teal-100 text-teal-800';
   return 'bg-slate-100 text-slate-800';
+}
+
+function isoToLocalInput(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function localInputToIso(v) {
+  if (!v) return null;
+  const d = new Date(v);
+  if (isNaN(d.getTime())) return null;
+  return d.toISOString();
 }
 
 function SortableItemRow({
@@ -396,7 +412,7 @@ export default function TeacherAssignmentDetail() {
   const [libraryLessons, setLibraryLessons] = useState([]);
   const [categories, setCategories] = useState([]);
   const [useCategories, setUseCategories] = useState(false);
-  const [derivedGp, setDerivedGp] = useState(null); // from gradebook, when in category
+  const [derivedGp, setDerivedGp] = useState(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [showLessonPicker, setShowLessonPicker] = useState(false);
@@ -407,6 +423,20 @@ export default function TeacherAssignmentDetail() {
   const [gradePointsDraft, setGradePointsDraft] = useState('');
   const [rawMax, setRawMax] = useState(0);
   const [reviewCount, setReviewCount] = useState(0);
+
+  const [editing, setEditing] = useState(false);
+  const [titleDraft, setTitleDraft] = useState('');
+  const [instructionsDraft, setInstructionsDraft] = useState('');
+  const [startAtDraft, setStartAtDraft] = useState('');
+  const [dueAtDraft, setDueAtDraft] = useState('');
+  const [allowRetakesDraft, setAllowRetakesDraft] = useState(false);
+
+  const [showCopyModal, setShowCopyModal] = useState(false);
+  const [copyClasses, setCopyClasses] = useState([]);
+  const [copyClassesLoading, setCopyClassesLoading] = useState(false);
+  const [copyTargetClassId, setCopyTargetClassId] = useState('');
+  const [copyTitle, setCopyTitle] = useState('');
+  const [copyBusy, setCopyBusy] = useState(false);
 
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -487,6 +517,57 @@ export default function TeacherAssignmentDetail() {
     }
   }, [assignment]);
 
+  const handleStartEdit = () => {
+    setTitleDraft(assignment.title || '');
+    setInstructionsDraft(assignment.instructions || '');
+    setStartAtDraft(isoToLocalInput(assignment.start_at));
+    setDueAtDraft(isoToLocalInput(assignment.due_at));
+    setAllowRetakesDraft(Boolean(assignment.allow_retakes));
+    setEditing(true);
+  };
+
+  const handleCancelEdit = () => {
+    setEditing(false);
+  };
+
+  const handleSaveEdits = async () => {
+    const trimmedTitle = titleDraft.trim();
+    if (!trimmedTitle) {
+      toast.error('Title cannot be empty.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const updated = await updateAssignment(assignmentId, {
+        title: trimmedTitle,
+        instructions: instructionsDraft.trim() || null,
+        start_at: localInputToIso(startAtDraft),
+        due_at: localInputToIso(dueAtDraft),
+        allow_retakes: allowRetakesDraft,
+      });
+      setAssignment(updated);
+      toast.success('Assignment updated.');
+      setEditing(false);
+      const gb = await getClassGradebook(classId);
+      setDerivedGp(gb.assignments.find((x) => x.id === assignmentId) || null);
+    } catch (err) {
+      console.error(err);
+      toast.error(err.message || 'Could not save changes.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleEditKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSaveEdits();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      handleCancelEdit();
+    }
+  };
+
   const commitGradePoints = async () => {
     const raw = gradePointsDraft.trim();
     let value = null;
@@ -515,7 +596,6 @@ export default function TeacherAssignmentDetail() {
       });
       setAssignment(updated);
       toast.success('Grade points saved.');
-      // Reload the gradebook view for this assignment so derivedGp updates.
       const gb = await getClassGradebook(classId);
       setDerivedGp(gb.assignments.find((x) => x.id === assignmentId) || null);
     } catch (err) {
@@ -539,6 +619,70 @@ export default function TeacherAssignmentDetail() {
       toast.error(err.message || 'Could not change category.');
     } finally {
       setBusy(false);
+    }
+  };
+
+  // ---------- Copy handlers ----------
+  const handleOpenCopy = async () => {
+    // Default title: the source title, stripped of any legacy "(copy)".
+    // No new suffix is added — the teacher can edit it here if they want.
+    const baseTitle = (assignment.title || '').replace(/\s*\(copy\)\s*$/i, '');
+    setCopyTitle(baseTitle || 'Assignment');
+    setCopyTargetClassId(classId);
+    setShowCopyModal(true);
+    setCopyClassesLoading(true);
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error('Not logged in');
+      const { data, error } = await supabase
+        .from('classes')
+        .select('id, name')
+        .eq('teacher_id', user.id)
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      setCopyClasses(data || []);
+    } catch (err) {
+      console.error(err);
+      toast.error('Could not load your classes.');
+      setCopyClasses([]);
+    } finally {
+      setCopyClassesLoading(false);
+    }
+  };
+
+  const handleCancelCopy = () => {
+    if (copyBusy) return;
+    setShowCopyModal(false);
+  };
+
+  const handleConfirmCopy = async () => {
+    if (!copyTargetClassId) {
+      toast.error('Pick a class to copy into.');
+      return;
+    }
+    setCopyBusy(true);
+    try {
+      const created = await duplicateAssignment(assignmentId, copyTargetClassId, {
+        title: copyTitle,
+      });
+      toast.success('Assignment copied.');
+      setShowCopyModal(false);
+      navigate(`/classes/${copyTargetClassId}/assignments/${created.id}`);
+    } catch (err) {
+      console.error(err);
+      toast.error(err.message || 'Could not copy assignment.');
+    } finally {
+      setCopyBusy(false);
+    }
+  };
+
+  const handleCopyKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && e.target.tagName !== 'TEXTAREA') {
+      e.preventDefault();
+      handleConfirmCopy();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      handleCancelCopy();
     }
   };
 
@@ -992,6 +1136,22 @@ export default function TeacherAssignmentDetail() {
               )}
             </div>
             <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={editing ? handleCancelEdit : handleStartEdit}
+                disabled={busy}
+                className="py-2 px-4 text-sm bg-gray-100 hover:bg-gray-200 text-gray-900 border border-gray-300 rounded-md disabled:opacity-50"
+              >
+                {editing ? 'Close editor' : 'Edit details'}
+              </button>
+              <button
+                type="button"
+                onClick={handleOpenCopy}
+                disabled={busy}
+                className="py-2 px-4 text-sm bg-gray-100 hover:bg-gray-200 text-gray-900 border border-gray-300 rounded-md disabled:opacity-50"
+              >
+                Copy
+              </button>
               {assignment.status === 'draft' ? (
                 <button
                   type="button"
@@ -1023,7 +1183,111 @@ export default function TeacherAssignmentDetail() {
           </div>
         </div>
 
-        {assignment.instructions && (
+        {editing && (
+          <section className="bg-white rounded-lg shadow p-6 mb-6 border-l-4 border-indigo-400">
+            <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-4">
+              Edit assignment
+            </h2>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Title
+                </label>
+                <input
+                  type="text"
+                  value={titleDraft}
+                  onChange={(e) => setTitleDraft(e.target.value)}
+                  onKeyDown={handleEditKeyDown}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Instructions shown to students
+                </label>
+                <textarea
+                  rows={4}
+                  value={instructionsDraft}
+                  onChange={(e) => setInstructionsDraft(e.target.value)}
+                  placeholder="Optional instructions that appear above the item list for students."
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Opens (start date and time)
+                  </label>
+                  <input
+                    type="datetime-local"
+                    value={startAtDraft}
+                    onChange={(e) => setStartAtDraft(e.target.value)}
+                    onKeyDown={handleEditKeyDown}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Students cannot open the assignment before this time. Leave
+                    blank for no opening restriction.
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Due date and time
+                  </label>
+                  <input
+                    type="datetime-local"
+                    value={dueAtDraft}
+                    onChange={(e) => setDueAtDraft(e.target.value)}
+                    onKeyDown={handleEditKeyDown}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Only assignments whose due date has passed count toward the
+                    rolling grade. Leave blank for a no-due-date assignment,
+                    which is also excluded from rolling grades.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  id="allow-retakes"
+                  type="checkbox"
+                  checked={allowRetakesDraft}
+                  onChange={(e) => setAllowRetakesDraft(e.target.checked)}
+                  className="w-4 h-4 text-indigo-600 rounded border-gray-300 focus:ring-indigo-500"
+                />
+                <label htmlFor="allow-retakes" className="text-sm text-gray-700">
+                  Allow retakes. Students who have already completed a lesson can
+                  try again.
+                </label>
+              </div>
+            </div>
+
+            <div className="mt-6 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={handleCancelEdit}
+                disabled={busy}
+                className="px-4 py-2 text-sm text-gray-700 hover:text-gray-900 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveEdits}
+                disabled={busy}
+                className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-md hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {busy ? 'Saving…' : 'Save changes'}
+              </button>
+            </div>
+          </section>
+        )}
+
+        {assignment.instructions && !editing && (
           <section className="bg-white rounded-lg shadow p-6 mb-6">
             <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">
               Instructions shown to students
@@ -1251,6 +1515,97 @@ export default function TeacherAssignmentDetail() {
           )}
         </section>
       </div>
+
+      {showCopyModal && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50"
+          onClick={handleCancelCopy}
+        >
+          <div
+            className="bg-white rounded-lg shadow-xl max-w-lg w-full"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-4 border-b border-gray-100 flex items-center justify-between">
+              <h3 className="font-semibold text-gray-900">Copy assignment</h3>
+              <button
+                type="button"
+                onClick={handleCancelCopy}
+                disabled={copyBusy}
+                className="text-gray-400 hover:text-gray-600 text-lg leading-none disabled:opacity-50"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="p-4 space-y-4">
+              <p className="text-xs text-gray-600">
+                This creates a fresh copy with new lesson copies and file
+                attachments. Student submissions and grades are not copied. The
+                copy lands as a <strong>draft</strong> at the top of the target
+                class.
+              </p>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Copy to class
+                </label>
+                {copyClassesLoading ? (
+                  <p className="text-sm text-gray-500">Loading classes…</p>
+                ) : (
+                  <select
+                    value={copyTargetClassId}
+                    onChange={(e) => setCopyTargetClassId(e.target.value)}
+                    onKeyDown={handleCopyKeyDown}
+                    disabled={copyBusy}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                  >
+                    <option value="">— Choose a class —</option>
+                    {copyClasses.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                        {c.id === classId ? ' (this class)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  New title
+                </label>
+                <input
+                  type="text"
+                  value={copyTitle}
+                  onChange={(e) => setCopyTitle(e.target.value)}
+                  onKeyDown={handleCopyKeyDown}
+                  disabled={copyBusy}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                />
+              </div>
+            </div>
+
+            <div className="p-4 border-t border-gray-100 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={handleCancelCopy}
+                disabled={copyBusy}
+                className="px-4 py-2 text-sm text-gray-700 hover:text-gray-900 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmCopy}
+                disabled={copyBusy || copyClassesLoading || !copyTargetClassId}
+                className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-md hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {copyBusy ? 'Copying…' : 'Copy assignment'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

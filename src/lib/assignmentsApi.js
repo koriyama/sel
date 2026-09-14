@@ -8,27 +8,16 @@ const ATTACHMENT_BUCKET = 'assignment-attachments';
 const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024; // 25 MB
 const ATTACHMENT_SIGNED_URL_SECONDS = 60 * 60; // 60 minutes
 
-// Extension whitelist. We validate by extension, not MIME, because
-// browsers report .tex / .r / .csv with blank or inconsistent MIME types.
 const ALLOWED_EXTENSIONS = new Set([
-  // documents
   '.pdf', '.doc', '.docx', '.odt', '.rtf', '.txt', '.md', '.tex', '.pages',
-  // spreadsheets
   '.xls', '.xlsx', '.ods', '.csv', '.numbers',
-  // presentations
   '.ppt', '.pptx', '.odp', '.key',
-  // images
   '.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif', '.bmp', '.svg',
-  // audio
   '.mp3', '.wav', '.m4a', '.ogg', '.aac', '.flac',
-  // code / data
   '.r', '.rmd', '.ipynb',
 ]);
 
-// Archive formats we refuse with a specific error message (extra clarity).
 const BLOCKED_ARCHIVE_EXTENSIONS = new Set(['.zip', '.rar', '.7z', '.tar', '.gz']);
-
-// Audio extensions that play inline in the student view instead of downloading.
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.ogg', '.aac', '.flac']);
 
 // ---------- helpers ----------
@@ -410,8 +399,6 @@ export async function addTextItem({ assignmentId, title, body }) {
   return data;
 }
 
-// Create a bare 'file' item (no file yet). The caller then calls
-// attachFileToItem to upload and fill in file metadata.
 export async function addFileItem({ assignmentId, title }) {
   const nextPos = await nextItemPosition(assignmentId);
   const { data, error } = await supabase
@@ -428,12 +415,6 @@ export async function addFileItem({ assignmentId, title }) {
   return data;
 }
 
-// Create a 'link' item pointing at an external URL. The optional
-// description is stored in the existing 'body' column.
-//
-// allowEmptyUrl is used when the teacher page wants to insert the item
-// first and let the teacher fill in the URL on the card. The page is
-// responsible for validating the URL before saving it later.
 export async function addLinkItem({
   assignmentId,
   title,
@@ -748,4 +729,146 @@ export async function getMyItemStatusMap(assignmentId) {
     }
   }
   return map;
+}
+
+// ---------- duplicate ----------
+//
+// Copies an assignment, all its items, and any lesson copies the items point
+// at. Submissions and grades are NOT copied. The copy lands as a draft at the
+// top of the target class.
+//
+// The title carries over unchanged. If you want a different title in the
+// target class, edit it in the modal before confirming.
+export async function duplicateAssignment(sourceAssignmentId, targetClassId, overrides = {}) {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('Not logged in');
+
+  const source = await getAssignmentById(sourceAssignmentId);
+  if (!source) throw new Error('Source assignment not found.');
+  const sourceItems = await listAssignmentItems(sourceAssignmentId);
+
+  const targetCategoryId =
+    source.class_id === targetClassId ? source.category_id : null;
+
+  const { data: topRows } = await supabase
+    .from('assignments')
+    .select('position')
+    .eq('class_id', targetClassId)
+    .order('position', { ascending: false, nullsFirst: false })
+    .limit(1);
+  const maxPosition = topRows && topRows[0] && topRows[0].position
+    ? topRows[0].position
+    : 0;
+  const nextPosition = maxPosition + 1;
+
+  // Source title, with any legacy "(copy)" suffix stripped so we don't
+  // propagate old naming into a fresh copy.
+  const baseTitle = stripCopySuffix(source.title || '') || 'Assignment';
+  const finalTitle =
+    overrides.title && overrides.title.trim()
+      ? overrides.title.trim()
+      : baseTitle;
+
+  const { data: newAssignment, error: asnErr } = await supabase
+    .from('assignments')
+    .insert({
+      class_id: targetClassId,
+      teacher_id: user.id,
+      title: finalTitle,
+      instructions: source.instructions || null,
+      start_at: source.start_at || null,
+      due_at: source.due_at || null,
+      status: 'draft',
+      position: nextPosition,
+      grade_points: source.grade_points,
+      category_id: targetCategoryId,
+      allow_retakes: source.allow_retakes || false,
+    })
+    .select()
+    .single();
+  if (asnErr) throw asnErr;
+
+  try {
+    for (let i = 0; i < sourceItems.length; i++) {
+      const item = sourceItems[i];
+      const baseRow = {
+        assignment_id: newAssignment.id,
+        position: i,
+        type: item.type,
+        title: item.title || null,
+        body: item.body || null,
+        is_optional: item.is_optional || false,
+      };
+
+      if (item.type === 'lesson' && item.lesson_id) {
+        const lessonCopy = await duplicateLesson(item.lesson_id, user.id, null);
+        const cleanLessonTitle = stripCopySuffix(lessonCopy.title);
+        const { error: tagErr } = await supabase
+          .from('lessons')
+          .update({ class_id: targetClassId, title: cleanLessonTitle })
+          .eq('id', lessonCopy.id);
+        if (tagErr) throw tagErr;
+
+        const { error: itmErr } = await supabase
+          .from('assignment_items')
+          .insert({ ...baseRow, lesson_id: lessonCopy.id })
+          .select()
+          .single();
+        if (itmErr) throw itmErr;
+      } else if (item.type === 'file' && item.file_path) {
+        const { data: created, error: itmErr } = await supabase
+          .from('assignment_items')
+          .insert(baseRow)
+          .select()
+          .single();
+        if (itmErr) throw itmErr;
+
+        try {
+          const blob = await downloadAttachmentBlob(item.file_path);
+          if (blob) {
+            const newFile = new File(
+              [blob],
+              item.file_name || 'file',
+              { type: item.mime_type || '' }
+            );
+            await attachFileToItem({
+              itemId: created.id,
+              assignmentId: newAssignment.id,
+              file: newFile,
+            });
+          }
+        } catch (fileErr) {
+          console.error('Could not copy attachment:', fileErr);
+        }
+      } else if (item.type === 'link') {
+        const { error: itmErr } = await supabase
+          .from('assignment_items')
+          .insert({ ...baseRow, url: item.url || null })
+          .select()
+          .single();
+        if (itmErr) throw itmErr;
+      } else {
+        const { error: itmErr } = await supabase
+          .from('assignment_items')
+          .insert(baseRow)
+          .select()
+          .single();
+        if (itmErr) throw itmErr;
+      }
+    }
+  } catch (err) {
+    try { await deleteAssignment(newAssignment.id); } catch { /* ignore */ }
+    throw err;
+  }
+
+  return newAssignment;
+}
+
+async function downloadAttachmentBlob(filePath) {
+  if (!filePath) return null;
+  const { data, error } = await supabase.storage
+    .from(ATTACHMENT_BUCKET)
+    .download(filePath);
+  if (error) throw error;
+  return data;
 }
